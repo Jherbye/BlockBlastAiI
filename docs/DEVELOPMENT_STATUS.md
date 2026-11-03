@@ -13,6 +13,10 @@ Stages D-F implemented as a first functional version (app module, capture, recog
     mirror had omitted that confidence term, so it did not catch this before CI.
   - Fix (in this revision, NOT yet re-run in CI): choose the minimum-error cell size, break near-ties with the prior, and
     scale fit confidence by 2x the fit limit. Mirror now includes the term: pipeline confidence 0.88 / 0.96, ok=true.
+- **Real device observation:** the user installed the app and sent a screenshot of Block Blast with the overlay panel
+  showing "Cannot read the screen reliably - board lattice confidence 0.17 too low". So the APK builds/installs/runs,
+  MediaProjection capture and the floating panel work on a real phone, and recognition failed in the locator. Diagnosed
+  and fixed (valley-based locator, see docs/RECOGNITION.md); the fix is NOT yet rebuilt or re-tested on the phone.
 - `build-apk` first run: stopped at the "Set up Android SDK" step (the step's own log was not seen). The workflow was
   changed (ubuntu-24.04, preinstalled SDK + license acceptance, setup-java v5). **The `:app` module has not been
   compiled yet; APK status unknown.**

@@ -27,7 +27,7 @@ data class PiecesReading(
  * the board, are edge-connected, are at most 5 cells wide/tall, and the tray cells are roughly 0.3-0.95 of the board
  * cell size.
  */
-class PieceExtractor(private val expectedTrayScale: Double = 0.6) {
+class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
 
     private class Blob(val x0: Int, val y0: Int, val w: Int, val h: Int, val count: Int)
 

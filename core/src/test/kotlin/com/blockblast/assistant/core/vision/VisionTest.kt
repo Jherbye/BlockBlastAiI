@@ -41,6 +41,14 @@ class VisionTest {
         assertTrue("cell ${g.cellSize}", abs(g.cellSize - 81f) <= 2.5f)
     }
 
+    @Test fun locatorWorksWhenTheBoardIsLowerAndSlightlyLarger() {
+        val frame = SyntheticFrames.render(spec(sampleBoard, left = 40, top = 700, cell = 121))
+        val g = BoardLocator().locate(frame)!!.geometry
+        assertTrue("left ${g.left}", abs(g.left - 40f) <= 12f)
+        assertTrue("top ${g.top}", abs(g.top - 700f) <= 12f)
+        assertTrue("cell ${g.cellSize}", abs(g.cellSize - 121f) <= 2.5f)
+    }
+
     @Test fun locatorWorksOnEmptyBoard() {
         val g = BoardLocator().locate(SyntheticFrames.render(spec(0L)))!!.geometry
         assertTrue(abs(g.left - 60f) <= 12f && abs(g.top - 480f) <= 12f && abs(g.cellSize - 120f) <= 2.5f)
