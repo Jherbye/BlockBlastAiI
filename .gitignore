@@ -1,0 +1,17 @@
+# Gradle / Android Studio
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+# Secrets and signing
+*.jks
+*.keystore
+keystore.properties
+# OS
+.DS_Store
+# Private test material: only commit screenshots you have permission to share
+/private-screenshots/
