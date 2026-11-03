@@ -1,54 +1,42 @@
 # Development status
 
 ## Current stage
-Stage B (pure puzzle engine + baseline solver) — written, **not compiled, not test-run**.
-Build-validation task: CI workflow added; **no CI run has happened**, so compilation and test status is still UNKNOWN.
+Stages D-F implemented as a first functional version (app module, capture, recognition, overlay, solver integration, APK CI).
+**Nothing in this repository has been compiled or run by the author** (no Kotlin/Android toolchain in the authoring
+sandbox). The user reported the earlier Stage B `core-validation` CI run "worked"; this was not independently seen.
+The first CI run of `build-apk` will be the first compile of the Android module and the new vision code.
 
-## Authoring environment (audit)
-JDK 21 and git 2.43 present. No Kotlin compiler, Gradle, Android SDK, or network. No prior repository.
-Therefore: no `./gradlew` wrapper was generated, Gradle plugin version 2.0.21 and JUnit 4.13.2 are unverified
-choices, and no Kotlin test has been executed.
+## What exists
+- `:core` (pure Kotlin, JVM 17 target): Board/Piece/RulesEngine, BaselineSolver (unchanged), Recommender, and the vision
+  package (see `docs/RECOGNITION.md`).
+- `:app` (Android, minSdk 29, targetSdk/compileSdk 35, plain Views, kotlinx-coroutines only):
+  - `MainActivity`: overlay permission, notification permission, MediaProjection consent, start/stop, settings
+    (opacity, search time, sensitivity, follow-up numbers), optional diagnostics (matrix, pieces, calibration,
+    confidence, search time/nodes/budget, state hash, transition, errors).
+  - `AssistantService` (foreground, type mediaProjection): capture loop, clean-scan / watch state machine, stale
+    invalidation, baseline solver on a worker thread with cancellation, ranked alternatives, rotation handling
+    (resize the existing VirtualDisplay), pause/resume, recalculation.
+  - `ScreenCapturer`: ImageReader -> in-memory ARGB frames, never saved.
+  - `OverlayController`: full-screen NOT_TOUCHABLE highlight window (cell fills, outlines, numbered follow-ups),
+    draggable/collapsible control panel (Prev, Next, Redo, Pause, Hide, Cal, Auto, Stop), manual calibration view.
+- CI: `core-validation.yml` (core tests) and `build-apk.yml` (core tests + `:app:assembleDebug`, uploads the debug APK
+  as artifact `block-blast-assistant-debug-apk`). No release publishing; that needs the owner's authorization.
 
-## What was actually verified
-- A Python re-implementation of the bit tricks (flood fill, isolated-cell count, region count, placement and
-  simultaneous row/column clearing) matched naive grid implementations on 20,000 random boards and 30,000
-  random placements (1,229 legal). This checks the algorithm, **not the Kotlin source**.
+## Safety boundary (unchanged)
+No gestures, taps, drags, Accessibility Service, ADB or input injection anywhere. The panel only receives touches meant
+for its own buttons. Verified by inspection only: the manifest declares no accessibility service.
 
-## Implemented (unverified by compiler)
-- `Board`, `Piece`, `RulesEngine`/`RuleConfig`, `BoardEvaluator`/`EvalWeights`, `BaselineSolver` with node/time budget and cancellation.
-- Tests: `RulesEngineTest` (13), `BaselineSolverTest` (8).
-
-## Design decisions
-- Board is a 64-bit bitboard (bit = y*8+x), immutable. Pieces normalized to a (0,0) top-left origin; no rotation.
-- Solver always returns every legal first move; on budget expiry or cancellation unexplored tails are scored as-is.
-- Equal-shaped pieces are searched once. Ties break by piece index, then y, then x.
-- Scoring is not modelled; heuristic score is separate and labelled as such.
-
-## Unverified game-rule assumptions (need observed gameplay)
-Simultaneous row+column clears; no piece rotation; clears resolve only after each placement; scoring rules.
-
-## Known defects / risks
-- Code may contain compile errors until first built.
-- Evaluator weights are untuned starting values.
-
-## Build validation pipeline (added after Stage B)
-- `.github/workflows/core-validation.yml`: JDK 21 (Temurin), Gradle 8.10.2 via `gradle/actions/setup-gradle`,
-  generates the wrapper if absent, then compiles main+test, runs `gradle :core:test`, re-runs the suite through
-  `./gradlew`, and uploads test reports plus the generated wrapper as artifacts. Read-only (`contents: read`).
-- Checked locally: the YAML parses. Not checked: that the workflow actually runs (nothing has been pushed).
-- Gradle wrapper files are NOT in the repo. The wrapper jar is a binary that cannot be produced without Gradle
-  or network access here. The first CI run produces it as the `gradle-wrapper-8.10.2` artifact; commit those files.
-
-## Build and test results
-None yet. Compilation errors: none recorded (never compiled). Test failures: none recorded (never run).
-Add the real CI output here after the first run.
-
-## Source areas to watch on first compile (suspicions, not observed errors)
-- `Piece.parse` uses `Array.flatMapIndexed` and `String.mapIndexedNotNull`; their availability on these receivers is unconfirmed.
-- Smart-cast and generics in `BaselineSolver`/tests have never been through the compiler.
+## Not verified / known risks
+- Compiles: unknown. Gradle/AGP/Kotlin versions (8.10.2 / 8.7.3 / 2.0.21) and the GitHub runner's Android SDK are assumptions.
+- Vision accuracy on the real game: unknown (synthetic frames only). Expect to need calibration and threshold tuning.
+- Overlay/alignment on real devices, cutouts, and rotation: untested. Capture size uses real display metrics.
+- Hiding the overlay for each scan causes a brief flicker of the panel (every few seconds while unverified).
+- Dragging a piece may briefly verify a transient state; it is corrected after the drop.
+- Scoring and exact line-clear rules remain unverified assumptions; heuristic scores are search guides only.
+- Notification/FGS-type permission flows on Android 14+/15 untested.
 
 ## Next steps
-1. With authorization, push the repo (or run the workflow some other way), read the real CI output, record every error here, fix genuine issues without weakening tests, and commit the wrapper files from the artifact.
-2. Commit the wrapper. Collect user-provided examples to confirm rules and scoring.
-3. Stage C: benchmark corpus, then beam search / transposition table / pruning, kept only if measured better.
-4. Stages D–F: Android app module, MediaProjection capture, recognition, overlay.
+1. Authorize a push; read the `build-apk` run; record every compile error/test failure here; fix without weakening tests.
+2. Install the debug APK; report what the diagnostics show on a real Block Blast screen (and screenshots you are happy to share).
+3. Tune recognition on real data; then consider Stage C solver improvements.
+4. Authorize versioned GitHub Releases when ready.

@@ -5,19 +5,23 @@ floating overlay. **It never taps, drags, or automates gameplay; the user makes 
 
 ## Status
 
-Stage B of the plan is written: the pure-Kotlin puzzle engine (`:core`) with a baseline solver and unit tests.
-**Not yet compiled or run** — see `docs/DEVELOPMENT_STATUS.md` for exactly what is and is not verified.
-Android capture, vision, and overlay (Stages D–E) do not exist yet.
+First functional version of the Android app, **never compiled or run yet**; see `docs/DEVELOPMENT_STATUS.md` and
+`docs/RECOGNITION.md` for exactly what is and is not verified. Recognition has been exercised on synthetic frames only.
+
+## Install (debug APK)
+GitHub Actions builds it: open the `build-apk` run -> **Artifacts** -> `block-blast-assistant-debug-apk` -> unzip -> install
+the `.apk` (allow installs from your file manager/browser). Then: grant overlay permission, tap Start, accept the screen
+capture prompt, open Block Blast. Use **Cal** in the floating panel if highlights do not align.
 
 ## Requirements
-- JDK 17 or newer
-- Gradle 8.x (to generate the wrapper once)
-- Later stages: Android Studio and Android SDK
+- JDK 17 or newer (CI uses 21), Gradle 8.10.2, Android SDK 35
+- Android 10+ (minSdk 29)
 
 ## Build and test
 ```
-gradle wrapper --gradle-version 8.10.2   # one time; wrapper files are not yet committed
+gradle wrapper --gradle-version 8.10.2   # one time, unless the wrapper is committed
 ./gradlew :core:test
+./gradlew :app:assembleDebug
 ```
 
 ## Continuous validation
@@ -27,9 +31,12 @@ gradle wrapper --gradle-version 8.10.2   # one time; wrapper files are not yet c
 - `core/model` — `Board` (immutable 8x8 bitboard), `Piece` (normalized relative cells)
 - `core/rules` — placement, line clears, no-move detection; rule assumptions in `RuleConfig`
 - `core/solver` — `BaselineSolver` (exhaustive reference search), `BoardEvaluator` (heuristic weights)
-- `docs/` — development status and notes
+- `core/vision` — board locator, cell classifier, piece extractor, stability tracker, change detector
+- `app/` — Android app: MediaProjection capture service, overlay, UI
+- `docs/` — development status and recognition notes
 
 ## Known limitations
 - Game scoring is not modelled (unverified). Heuristic scores are search guides, not game scores.
 - Line-clear behaviour (simultaneous row/column clears, no rotation) is an unverified assumption.
-- No vision, capture, or overlay code yet.
+- Recognition is unvalidated on real screenshots; manual calibration is the fallback.
+- Suggestions only: the app never taps, swipes or automates the game.
