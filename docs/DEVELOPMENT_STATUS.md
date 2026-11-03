@@ -2,9 +2,21 @@
 
 ## Current stage
 Stages D-F implemented as a first functional version (app module, capture, recognition, overlay, solver integration, APK CI).
-**Nothing in this repository has been compiled or run by the author** (no Kotlin/Android toolchain in the authoring
-sandbox). The user reported the earlier Stage B `core-validation` CI run "worked"; this was not independently seen.
-The first CI run of `build-apk` will be the first compile of the Android module and the new vision code.
+
+## Real CI results so far (from logs pasted by the user)
+- `core-validation`, `:core:test`: **Kotlin compiled** (core main + tests incl. the vision package). **35 tests ran: 33 passed, 2 failed.**
+  All Stage B rules/solver tests passed. Failures (both `VisionTest`):
+  - `pipelineEndToEndFeedsTheSolver` (VisionTest.kt:87) and `trackerNeedsConsecutiveIdenticalReadings` (:113):
+    `RecognitionResult.ok` was false on a clean synthetic frame.
+  - Root cause: `PieceExtractor` chose the tray cell size closest to the 0.6 prior instead of the best fit, and scaled the
+    fit confidence too harshly (fit error 0.079 -> confidence 0.47, below the 0.5 acceptance threshold). My Python
+    mirror had omitted that confidence term, so it did not catch this before CI.
+  - Fix (in this revision, NOT yet re-run in CI): choose the minimum-error cell size, break near-ties with the prior, and
+    scale fit confidence by 2x the fit limit. Mirror now includes the term: pipeline confidence 0.88 / 0.96, ok=true.
+- `build-apk` first run: stopped at the "Set up Android SDK" step (the step's own log was not seen). The workflow was
+  changed (ubuntu-24.04, preinstalled SDK + license acceptance, setup-java v5). **The `:app` module has not been
+  compiled yet; APK status unknown.**
+- Test logging now prints failure messages in the CI console.
 
 ## What exists
 - `:core` (pure Kotlin, JVM 17 target): Board/Piece/RulesEngine, BaselineSolver (unchanged), Recommender, and the vision
@@ -27,7 +39,7 @@ No gestures, taps, drags, Accessibility Service, ADB or input injection anywhere
 for its own buttons. Verified by inspection only: the manifest declares no accessibility service.
 
 ## Not verified / known risks
-- Compiles: unknown. Gradle/AGP/Kotlin versions (8.10.2 / 8.7.3 / 2.0.21) and the GitHub runner's Android SDK are assumptions.
+- `:core` compiles (CI). `:app` compile: unknown. AGP 8.7.3 and the runner's Android SDK are assumptions.
 - Vision accuracy on the real game: unknown (synthetic frames only). Expect to need calibration and threshold tuning.
 - Overlay/alignment on real devices, cutouts, and rotation: untested. Capture size uses real display metrics.
 - Hiding the overlay for each scan causes a brief flicker of the panel (every few seconds while unverified).
@@ -36,7 +48,7 @@ for its own buttons. Verified by inspection only: the manifest declares no acces
 - Notification/FGS-type permission flows on Android 14+/15 untested.
 
 ## Next steps
-1. Authorize a push; read the `build-apk` run; record every compile error/test failure here; fix without weakening tests.
+1. Push this revision; read the `core-validation` and `build-apk` runs; record every compile error/test failure here; fix without weakening tests.
 2. Install the debug APK; report what the diagnostics show on a real Block Blast screen (and screenshots you are happy to share).
 3. Tune recognition on real data; then consider Stage C solver improvements.
 4. Authorize versioned GitHub Releases when ready.

@@ -76,8 +76,8 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.6) {
         }
 
         val (c, fitErr) = chooseCellSize(kept, s)
-        val fitConf = (1.0 - fitErr / 0.15).coerceIn(0.0, 1.0)
-        if (fitErr >= 0.15) notes.add("tray cell size fit is poor (err=${"%.2f".format(fitErr)})")
+        val fitConf = (1.0 - fitErr / (2.0 * FIT_LIMIT)).coerceIn(0.0, 1.0)
+        if (fitErr >= FIT_LIMIT) notes.add("tray cell size fit is poor (err=${"%.2f".format(fitErr)})")
 
         val detected = ArrayList<DetectedPiece>()
         var minConf = min(fitConf, confidenceCap)
@@ -118,32 +118,38 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.6) {
         return PiecesReading(detected, c, if (detected.isEmpty()) 0.0 else minConf, notes)
     }
 
+    /**
+     * Picks one tray cell size for all blobs. First the fit error is minimised (every blob dimension should be a whole
+     * number of cells); among near-best fits the size closest to [expectedTrayScale] x board cell wins, which resolves
+     * the c versus 2c ambiguity.
+     */
     private fun chooseCellSize(blobs: List<Blob>, boardCell: Double): Pair<Double, Double> {
-        var bestFitC = -1.0
-        var bestFitDist = Double.MAX_VALUE
-        var bestFitErr = 0.0
-        var fallbackC = boardCell * expectedTrayScale
-        var fallbackErr = Double.MAX_VALUE
+        val sizes = ArrayList<Double>()
+        val errors = ArrayList<Double>()
         var c = 0.30 * boardCell
         while (c <= 0.95 * boardCell) {
             var err = 0.0
             for (b in blobs) err += dimErr(b.w / c) + dimErr(b.h / c)
-            err /= (2.0 * blobs.size)
-            if (err < fallbackErr) {
-                fallbackErr = err
-                fallbackC = c
-            }
-            if (err < 0.15) {
-                val dist = abs(c / boardCell - expectedTrayScale)
-                if (dist < bestFitDist) {
-                    bestFitDist = dist
-                    bestFitC = c
-                    bestFitErr = err
-                }
-            }
+            sizes.add(c)
+            errors.add(err / (2.0 * blobs.size))
             c += 0.5
         }
-        return if (bestFitC > 0) bestFitC to bestFitErr else fallbackC to fallbackErr
+        var minIdx = 0
+        for (i in errors.indices) if (errors[i] < errors[minIdx]) minIdx = i
+        val minErr = errors[minIdx]
+        if (minErr >= FIT_LIMIT) return sizes[minIdx] to minErr
+        var bestIdx = minIdx
+        var bestDist = Double.MAX_VALUE
+        for (i in sizes.indices) {
+            if (errors[i] < FIT_LIMIT && errors[i] <= minErr + 0.02) {
+                val dist = abs(sizes[i] / boardCell - expectedTrayScale)
+                if (dist < bestDist) {
+                    bestDist = dist
+                    bestIdx = i
+                }
+            }
+        }
+        return sizes[bestIdx] to errors[bestIdx]
     }
 
     private fun dimErr(v: Double): Double {
@@ -202,6 +208,8 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.6) {
     }
 
     private companion object {
+        /** Mean per-dimension error (in cells) above which the common cell size is not considered a fit. */
+        const val FIT_LIMIT = 0.15
         val DX = intArrayOf(1, -1, 0, 0)
         val DY = intArrayOf(0, 0, 1, -1)
     }
