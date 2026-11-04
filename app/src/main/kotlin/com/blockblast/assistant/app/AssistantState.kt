@@ -18,6 +18,11 @@ data class Snapshot(
     val lastError: String = "-",
     val notes: String = "-",
     val recommendationCount: Int = 0,
+    /** RecognitionStatus name of the last frame (READY, NEEDS_CORRECTION, ...). */
+    val recognitionStatus: String = "-",
+    val unsureCells: Int = 0,
+    val unsurePieces: Int = 0,
+    val themeModelActive: Boolean = false,
 )
 
 object AssistantState {

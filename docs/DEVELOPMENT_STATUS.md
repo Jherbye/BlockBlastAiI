@@ -1,6 +1,14 @@
 # Development status
 
-## Current stage
+## Latest: theme-independent recognition (adaptive)
+- Implemented: `vision/adaptive` (grid geometry, theme-free cell analysis, learned theme model, tray reader, temporal fusion,
+  confidence gating), integrated into `AssistantService` (replaces `RecognitionPipeline`), correction/confirmation editor
+  (`ReviewView`, "Fix", "Reset theme"), snapshot fields for status/unsure cells. See `docs/RECOGNITION.md`.
+- Tested (JVM, standalone kotlinc + JUnit): 52 core tests pass; synthetic robustness suite in `docs/ROBUSTNESS_REPORT.md`.
+- **Not validated on real gameplay screenshots. `:app` not compiled in this environment. Not run on a device.**
+- The "Recognition sensitivity" setting now means strictness (confidence threshold 0.45-0.65; default equals the tested 0.55).
+
+## Earlier stage
 Stages D-F implemented as a first functional version (app module, capture, recognition, overlay, solver integration, APK CI).
 
 ## Real CI results so far (from logs pasted by the user)
@@ -45,6 +53,7 @@ for its own buttons. Verified by inspection only: the manifest declares no acces
 ## Not verified / known risks
 - `:core` compiles (CI). `:app` compile: unknown. AGP 8.7.3 and the runner's Android SDK are assumptions.
 - Vision accuracy on the real game: unknown (synthetic frames only). Expect to need calibration and threshold tuning.
+- Adaptive recogniser: one known low-contrast piece-column failure (report), on-device speed/memory unmeasured, editor UX untested on a phone.
 - Overlay/alignment on real devices, cutouts, and rotation: untested. Capture size uses real display metrics.
 - Hiding the overlay for each scan causes a brief flicker of the panel (every few seconds while unverified).
 - Dragging a piece may briefly verify a transient state; it is corrected after the drop.

@@ -17,6 +17,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.blockblast.assistant.core.model.Piece
 import com.blockblast.assistant.core.solver.Move
 import com.blockblast.assistant.core.solver.Recommendation
 import com.blockblast.assistant.core.vision.BoardGeometry
@@ -41,6 +42,15 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         fun onAutoCalibrate()
         fun onStop()
         fun onCalibrationDone(geometry: BoardGeometry)
+        /** User opened the editor (button) or asked for it from a "needs correction" status. */
+        fun onRequestReview()
+        /** Editor "Looks right": the shown reading is correct (teaches the theme model). */
+        fun onReviewConfirm()
+        /** Editor "Apply my fixes": the corrected board bits and the three tray slots (null = empty slot). */
+        fun onReviewApply(bits: Long, pieces: List<Piece?>)
+        fun onReviewCancel()
+        /** Forget what the assistant learned about the current theme. */
+        fun onResetTheme()
     }
 
     private val ctx = ContextThemeWrapper(context, android.R.style.Theme_DeviceDefault)
@@ -55,6 +65,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     private lateinit var panelParams: WindowManager.LayoutParams
     private var highlightParams: WindowManager.LayoutParams? = null
     private var calibration: CalibrationView? = null
+    private var review: ReviewView? = null
     private var added = false
 
     private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
@@ -102,6 +113,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
 
     fun destroy() {
         stopCalibration()
+        stopReview()
         if (added) {
             runCatching { wm.removeView(highlight) }
             runCatching { wm.removeView(panel) }
@@ -207,9 +219,13 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         row2.addView(smallButton("Cal") { callbacks.onCalibrate() })
         row2.addView(smallButton("Auto") { callbacks.onAutoCalibrate() })
         row2.addView(smallButton("Stop") { callbacks.onStop() })
+        val row3 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        row3.addView(smallButton("Fix") { callbacks.onRequestReview() })
+        row3.addView(smallButton("Reset theme") { callbacks.onResetTheme() })
         controls.orientation = LinearLayout.VERTICAL
         controls.addView(row1)
         controls.addView(row2)
+        controls.addView(row3)
         panel.addView(controls)
 
         // Drag by the status line; tap it to collapse or expand.
@@ -266,6 +282,40 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     private fun stopCalibration() {
         calibration?.let { runCatching { wm.removeView(it) } }
         calibration = null
+    }
+
+    // ---- manual correction / confirmation -------------------------------------------------------------------------
+
+    /**
+     * Opens the editor over the board. Highlights are cleared first so no move is shown from an unconfirmed reading.
+     * [cellConfidence] (64 values) and [pieceConfidence] (per slot) only drive the red "unsure" outlines.
+     */
+    fun startReview(
+        geometry: BoardGeometry, bits: Long, cellConfidence: DoubleArray?, pieces: List<Piece?>,
+        pieceConfidence: List<Double>, confirmMode: Boolean,
+    ) {
+        if (review != null) return
+        clearHighlights()
+        val (w, h) = screenSize()
+        val view = ReviewView(
+            ctx, geometry, bits, cellConfidence, pieces, pieceConfidence, confirmMode, w,
+            onConfirm = { stopReview(); callbacks.onReviewConfirm() },
+            onApply = { b, p -> stopReview(); callbacks.onReviewApply(b, p) },
+            onCancel = { stopReview(); callbacks.onReviewCancel() },
+        )
+        val lp = WindowManager.LayoutParams(
+            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        wm.addView(view, lp)
+        review = view
+    }
+
+    fun stopReview() {
+        review?.let { runCatching { wm.removeView(it) } }
+        review = null
     }
 
     // ---- views -----------------------------------------------------------------------------------------------------

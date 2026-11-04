@@ -29,11 +29,13 @@ import com.blockblast.assistant.core.solver.SearchResult
 import com.blockblast.assistant.core.vision.BoardGeometry
 import com.blockblast.assistant.core.vision.ChangeDetector
 import com.blockblast.assistant.core.vision.FrameBaseline
-import com.blockblast.assistant.core.vision.RecognitionPipeline
-import com.blockblast.assistant.core.vision.RecognitionResult
-import com.blockblast.assistant.core.vision.Stability
-import com.blockblast.assistant.core.vision.StableStateTracker
-import com.blockblast.assistant.core.vision.VerifiedState
+import com.blockblast.assistant.core.model.Piece
+import com.blockblast.assistant.core.vision.adaptive.AdaptiveRecognizer
+import com.blockblast.assistant.core.vision.adaptive.AdaptiveResult
+import com.blockblast.assistant.core.vision.adaptive.AdaptiveStability
+import com.blockblast.assistant.core.vision.adaptive.AdaptiveStateTracker
+import com.blockblast.assistant.core.vision.adaptive.AdaptiveVerified
+import com.blockblast.assistant.core.vision.adaptive.RecognitionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -71,15 +73,18 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private var solveJob: Job? = null
     private var solveToken: CancellationToken? = null
 
-    private val pipeline = RecognitionPipeline()
-    private val tracker = StableStateTracker(2)
+    private val recognizer = AdaptiveRecognizer()
+    private val tracker = AdaptiveStateTracker(2)
     private val detector = ChangeDetector()
     private val solver = BaselineSolver()
 
     // Logic-thread state
     private var mode = Mode.SCANNING
     private var scanDelayMs = 600L
-    private var verified: VerifiedState? = null
+    private var verified: AdaptiveVerified? = null
+    private var lastResult: AdaptiveResult? = null
+    /** True once we have shown the editor for the current unsure episode (reset when a reading becomes READY). */
+    private var reviewPrompted = false
     private var recs: List<Recommendation> = emptyList()
     private var recIndex = 0
     private var baseline: FrameBaseline? = null
@@ -90,6 +95,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
     // Written from the main thread
     @Volatile private var paused = false
     @Volatile private var calibrating = false
+    @Volatile private var reviewing = false
     @Volatile private var highlightsEnabled = true
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -160,7 +166,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private suspend fun runLoop() {
         while (currentCoroutineContext().isActive) {
             delay(if (mode == Mode.SCANNING) scanDelayMs else WATCH_MS)
-            if (paused || calibrating) continue
+            if (paused || calibrating || reviewing) continue
             try {
                 if (mode == Mode.SCANNING) cleanScan() else watch()
             } catch (e: CancellationException) {
@@ -191,22 +197,79 @@ class AssistantService : Service(), OverlayController.Callbacks {
             setStatus("Waiting for the first screen frame…", "")
             return
         }
-        pipeline.sensitivity = settings.sensitivityPercent / 100.0
+        recognizer.minConfidence = 0.45 + 0.20 * settings.sensitivityPercent / 100.0
         val manual = settings.manualGeometry(frame.width, frame.height)
-        val result = withContext(Dispatchers.Default) { pipeline.recognize(frame, manual) }
+        val result = withContext(Dispatchers.Default) { recognizer.recognize(frame, manual) }
+        handleResult(result)
+    }
+
+    /** Single place that turns a recognition result into UI + solver activity. Moves are shown ONLY for READY. */
+    private suspend fun handleResult(result: AdaptiveResult) {
+        lastResult = result
         publishRecognition(result)
         when (val st = tracker.offer(result)) {
-            is Stability.Verified -> onVerified(st.state)
-            is Stability.Pending -> {
+            is AdaptiveStability.Verified -> {
+                reviewPrompted = false
+                recognizer.onVerified(result)
+                onVerified(st.state)
+            }
+            is AdaptiveStability.Pending -> {
                 scanDelayMs = 450L
                 setStatus("Verifying board… (${st.seen}/${st.needed})", "")
             }
-            is Stability.Rejected -> {
-                scanDelayMs = 900L
-                clearHighlightsOnMain()
-                setStatus("Cannot read the screen reliably", st.reason)
-            }
+            is AdaptiveStability.NotReady -> onNotReady(result, st)
         }
+    }
+
+    private suspend fun onNotReady(result: AdaptiveResult, st: AdaptiveStability.NotReady) {
+        invalidateRecommendationsQuietly()
+        when (st.status) {
+            RecognitionStatus.NO_BOARD -> {
+                scanDelayMs = 1200L
+                reviewPrompted = false
+                setStatus("Board not found", "Open Block Blast with the whole board visible, or use Cal to align the grid by hand.")
+            }
+            RecognitionStatus.NO_PIECES -> {
+                scanDelayMs = 700L
+                setStatus("Waiting for pieces…", "Board read; no pieces visible yet.")
+            }
+            RecognitionStatus.NEEDS_CONFIRMATION, RecognitionStatus.NEEDS_CORRECTION -> {
+                scanDelayMs = 1500L
+                val confirm = st.status == RecognitionStatus.NEEDS_CONFIRMATION
+                setStatus(
+                    if (confirm) "New theme - please confirm the board" else "Recognition needs correction",
+                    "No moves are shown from an unsure reading. Tap Fix to check it. ${st.reason}",
+                )
+                if (!reviewPrompted && result.geometry != null) {
+                    reviewPrompted = true
+                    openReview(result)
+                }
+            }
+            RecognitionStatus.READY -> Unit
+        }
+    }
+
+    private suspend fun invalidateRecommendationsQuietly() {
+        solveToken?.cancel()
+        solveJob?.cancel()
+        recs = emptyList()
+        verified = null
+        clearHighlightsOnMain()
+        AssistantState.update { it.copy(recommendationCount = 0) }
+    }
+
+    /** Opens the correction editor with what was read, low-confidence cells and pieces marked. */
+    private suspend fun openReview(result: AdaptiveResult) {
+        val g = result.geometry ?: return
+        val ov = overlay ?: return
+        val bySlot = MutableList<Piece?>(3) { null }
+        val confBySlot = MutableList(3) { 1.0 }
+        result.pieces.forEach { if (it.slot in 0..2) { bySlot[it.slot] = it.piece; confBySlot[it.slot] = it.confidence } }
+        val cellConf = result.cells?.confidence
+        val bits = result.bits ?: 0L
+        val confirmMode = result.status == RecognitionStatus.NEEDS_CONFIRMATION
+        reviewing = true
+        withContext(Dispatchers.Main) { ov.startReview(g, bits, cellConf, bySlot, confBySlot, confirmMode) }
     }
 
     private suspend fun watch() {
@@ -256,7 +319,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         AssistantState.update { it.copy(recommendationCount = 0, lastTransition = reason) }
     }
 
-    private suspend fun onVerified(state: VerifiedState) {
+    private suspend fun onVerified(state: AdaptiveVerified) {
         mode = Mode.WATCHING
         verified = state
         changeStart = 0L
@@ -267,7 +330,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         startSolve(state)
     }
 
-    private fun startSolve(state: VerifiedState) {
+    private fun startSolve(state: AdaptiveVerified) {
         solveToken?.cancel()
         solveJob?.cancel()
         val token = CancellationToken()
@@ -281,7 +344,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         }
     }
 
-    private suspend fun onSolved(result: SearchResult, state: VerifiedState) {
+    private suspend fun onSolved(result: SearchResult, state: AdaptiveVerified) {
         recs = Recommender.from(result, 12)
         recIndex = 0
         AssistantState.update {
@@ -323,7 +386,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
             overlay?.onScreenChanged()
             overlay?.clearHighlights()
         }
-        pipeline.clearCache()
+        recognizer.clearGeometryCache()
         tracker.reset()
         verified = null
         recs = emptyList()
@@ -396,7 +459,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         val (w, h, _) = displayInfo()
         settings.setManualGeometry(geometry, w, h)
         calibrating = false
-        pipeline.clearCache()
+        recognizer.clearGeometryCache()
         scope.launch {
             tracker.reset()
             mode = Mode.SCANNING
@@ -407,13 +470,74 @@ class AssistantService : Service(), OverlayController.Callbacks {
 
     override fun onAutoCalibrate() {
         settings.clearManualGeometry()
-        pipeline.clearCache()
+        recognizer.clearGeometryCache()
         scope.launch {
             tracker.reset()
             mode = Mode.SCANNING
             scanDelayMs = 100L
             AssistantState.update { it.copy(lastTransition = "switched to automatic board detection") }
         }
+    }
+
+    override fun onRequestReview() {
+        scope.launch {
+            val r = lastResult
+            if (r?.geometry == null) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@AssistantService, "No board found yet - use Cal to align the grid first", Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            solveToken?.cancel()
+            openReview(r)
+        }
+    }
+
+    override fun onReviewConfirm() {
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { recognizer.confirm() }
+            afterReview(r, "board confirmed by the user")
+        }
+    }
+
+    override fun onReviewApply(bits: Long, pieces: List<Piece?>) {
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { recognizer.correct(bits, pieces) }
+            afterReview(r, "board/pieces corrected by the user")
+        }
+    }
+
+    override fun onReviewCancel() {
+        scope.launch {
+            reviewing = false
+            tracker.reset()
+            mode = Mode.SCANNING
+            scanDelayMs = 1500L
+        }
+    }
+
+    override fun onResetTheme() {
+        scope.launch {
+            recognizer.resetTheme()
+            tracker.reset()
+            reviewPrompted = false
+            mode = Mode.SCANNING
+            scanDelayMs = 100L
+            AssistantState.update { it.copy(lastTransition = "learned theme forgotten", themeModelActive = false) }
+        }
+    }
+
+    private suspend fun afterReview(r: AdaptiveResult?, what: String) {
+        reviewing = false
+        if (r == null) {
+            setStatus("Nothing to correct yet", "Waiting for a fresh screen reading.")
+            mode = Mode.SCANNING
+            scanDelayMs = 300L
+            return
+        }
+        AssistantState.update { it.copy(lastTransition = what) }
+        mode = Mode.SCANNING
+        handleResult(r)
     }
 
     override fun onStop() {
@@ -444,22 +568,26 @@ class AssistantService : Service(), OverlayController.Callbacks {
         else -> "right"
     }
 
-    private fun publishRecognition(r: RecognitionResult) {
-        val rows = r.board?.let { Board.ofBits(it.bits).toRows() } ?: emptyList()
-        val pieceLines = r.pieces?.pieces?.map { dp ->
-            "slot ${dp.slot}: " + dp.piece.cells.joinToString(" ") { "(${it.x},${it.y})" }
-        } ?: emptyList()
+    private fun publishRecognition(r: AdaptiveResult) {
+        val rows = r.board?.toRows() ?: emptyList()
+        val pieceLines = r.pieces.map { p ->
+            "slot ${p.slot} (conf %.2f): ".format(p.confidence) + p.piece.cells.joinToString(" ") { "(${it.x},${it.y})" }
+        }
         val g = r.geometry
         val geo = if (g == null) "not found" else
-            "left=%.1f top=%.1f cell=%.1f (%s, locate conf %.2f)".format(g.left, g.top, g.cellSize, r.source.name.lowercase(), r.locateConfidence)
+            "left=%.1f top=%.1f cell=%.1f (%s, grid conf %.2f)".format(g.left, g.top, g.cellSize, r.geometrySource.name.lowercase(), r.geometryConfidence)
         AssistantState.update {
             it.copy(
                 boardRows = rows,
                 pieceLines = pieceLines,
                 geometryText = geo,
                 recognitionConfidence = r.confidence,
-                stateHash = r.board?.let { b -> java.lang.Long.toHexString(b.bits) } ?: "-",
+                stateHash = r.bits?.let { b -> java.lang.Long.toHexString(b) } ?: "-",
                 notes = r.notes.joinToString("; ").ifEmpty { "-" },
+                recognitionStatus = r.status.name,
+                unsureCells = r.lowConfidenceCells.size,
+                unsurePieces = r.lowConfidencePieceSlots.size,
+                themeModelActive = r.themeModelActive,
             )
         }
     }
