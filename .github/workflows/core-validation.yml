@@ -42,10 +42,28 @@ jobs:
           ls -la gradlew gradle/wrapper
 
       - name: Compile main and test sources
-        run: gradle :core:compileKotlin :core:compileTestKotlin --warning-mode all --stacktrace
+        run: |
+          set +e
+          gradle :core:compileKotlin :core:compileTestKotlin --console=plain --warning-mode all > compile.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            { echo "## Failures in: gradle :core:compileKotlin :core:compileTestKotlin"; echo '```'; grep -E '^(e: |.*FAILED$|.*AssertionError.*|.*Exception.*at .*Test)' compile.log | head -80; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^e: ' compile.log | head -80
+          fi
+          tail -15 compile.log
+          exit $status
 
       - name: Run core test suite
-        run: gradle :core:test --warning-mode all --stacktrace
+        run: |
+          set +e
+          gradle :core:test --console=plain --warning-mode all > test.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            { echo "## Failures in: gradle :core:test"; echo '```'; grep -E '^(e: |.*FAILED$|.*AssertionError.*|.*Exception.*at .*Test)' test.log | head -80; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^e: ' test.log | head -80
+          fi
+          tail -15 test.log
+          exit $status
 
       - name: Validate wrapper (rerun tests through ./gradlew)
         run: ./gradlew :core:test --rerun-tasks --stacktrace
@@ -72,6 +90,8 @@ jobs:
             core/build/reports/tests/
             core/build/reports/theme-robustness.txt
             core/build/test-results/
+            compile.log
+            test.log
           if-no-files-found: warn
 
       - name: Upload generated wrapper (commit these files)

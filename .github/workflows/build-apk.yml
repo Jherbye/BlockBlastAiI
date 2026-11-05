@@ -43,10 +43,28 @@ jobs:
           fi
 
       - name: Core unit tests (rules, solver, vision)
-        run: gradle :core:test --warning-mode all --stacktrace
+        run: |
+          set +e
+          gradle :core:test --console=plain --warning-mode all > test.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            { echo "## Failures in: gradle :core:test"; echo '```'; grep -E '^(e: |.*FAILED$|.*AssertionError.*|.*Exception.*at .*Test)' test.log | head -80; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^e: ' test.log | head -80
+          fi
+          tail -15 test.log
+          exit $status
 
       - name: Build debug APK
-        run: gradle :app:assembleDebug --warning-mode all --stacktrace
+        run: |
+          set +e
+          gradle :app:assembleDebug --console=plain --warning-mode all > apk.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            { echo "## Failures in: gradle :app:assembleDebug"; echo '```'; grep -E '^(e: |.*FAILED$|.*AssertionError.*|.*Exception.*at .*Test)' apk.log | head -80; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^e: ' apk.log | head -80
+          fi
+          tail -15 apk.log
+          exit $status
 
       - name: Summarize test results
         if: always()
@@ -70,6 +88,8 @@ jobs:
             core/build/reports/tests/
             core/build/reports/theme-robustness.txt
             core/build/test-results/
+            test.log
+            apk.log
           if-no-files-found: warn
 
       - name: Upload debug APK
