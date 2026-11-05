@@ -1,14 +1,6 @@
 # Development status
 
-## Latest: theme-independent recognition (adaptive)
-- Implemented: `vision/adaptive` (grid geometry, theme-free cell analysis, learned theme model, tray reader, temporal fusion,
-  confidence gating), integrated into `AssistantService` (replaces `RecognitionPipeline`), correction/confirmation editor
-  (`ReviewView`, "Fix", "Reset theme"), snapshot fields for status/unsure cells. See `docs/RECOGNITION.md`.
-- Tested (JVM, standalone kotlinc + JUnit): 52 core tests pass; synthetic robustness suite in `docs/ROBUSTNESS_REPORT.md`.
-- **Not validated on real gameplay screenshots. `:app` not compiled in this environment. Not run on a device.**
-- The "Recognition sensitivity" setting now means strictness (confidence threshold 0.45-0.65; default equals the tested 0.55).
-
-## Earlier stage
+## Current stage
 Stages D-F implemented as a first functional version (app module, capture, recognition, overlay, solver integration, APK CI).
 
 ## Real CI results so far (from logs pasted by the user)
@@ -29,6 +21,13 @@ Stages D-F implemented as a first functional version (app module, capture, recog
   changed (ubuntu-24.04, preinstalled SDK + license acceptance, setup-java v5). **The `:app` module has not been
   compiled yet; APK status unknown.**
 - Test logging now prints failure messages in the CI console.
+
+## Theme-independent recognition (latest work)
+Requirement: the vision must not depend on fixed colours, textures or themes. Implemented: gap-geometry locator (both
+polarities, normalised), empty-look cell reader with multi-cue orientation and learning, background-relative tray reader
+with empty-slot cross-check, per-cell/piece/geometry confidence, strict acceptance rule, manual calibration (**Cal**),
+manual correction with theme learning (**Fix**), synthetic theme generator and robustness test with a CI-uploaded report.
+See `docs/RECOGNITION.md` for the implemented / validated split. The Kotlin port and the app changes are NOT yet compiled.
 
 ## What exists
 - `:core` (pure Kotlin, JVM 17 target): Board/Piece/RulesEngine, BaselineSolver (unchanged), Recommender, and the vision
@@ -53,7 +52,6 @@ for its own buttons. Verified by inspection only: the manifest declares no acces
 ## Not verified / known risks
 - `:core` compiles (CI). `:app` compile: unknown. AGP 8.7.3 and the runner's Android SDK are assumptions.
 - Vision accuracy on the real game: unknown (synthetic frames only). Expect to need calibration and threshold tuning.
-- Adaptive recogniser: one known low-contrast piece-column failure (report), on-device speed/memory unmeasured, editor UX untested on a phone.
 - Overlay/alignment on real devices, cutouts, and rotation: untested. Capture size uses real display metrics.
 - Hiding the overlay for each scan causes a brief flicker of the panel (every few seconds while unverified).
 - Dragging a piece may briefly verify a transient state; it is corrected after the drop.
@@ -61,6 +59,7 @@ for its own buttons. Verified by inspection only: the manifest declares no acces
 - Notification/FGS-type permission flows on Android 14+/15 untested.
 
 ## Next steps
+0. Push, read the CI run (core tests incl. `ThemeRobustnessTest`, then `:app:assembleDebug`); fix real compile/test failures.
 1. Push this revision; read the `core-validation` and `build-apk` runs; record every compile error/test failure here; fix without weakening tests.
 2. Install the debug APK; report what the diagnostics show on a real Block Blast screen (and screenshots you are happy to share).
 3. Tune recognition on real data; then consider Stage C solver improvements.

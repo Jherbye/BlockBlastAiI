@@ -68,6 +68,7 @@ jobs:
           name: core-test-reports-apk-job
           path: |
             core/build/reports/tests/
+            core/build/reports/theme-robustness.txt
             core/build/test-results/
           if-no-files-found: warn
 

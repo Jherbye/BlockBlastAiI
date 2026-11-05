@@ -17,6 +17,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.blockblast.assistant.core.model.Cell
 import com.blockblast.assistant.core.model.Piece
 import com.blockblast.assistant.core.solver.Move
 import com.blockblast.assistant.core.solver.Recommendation
@@ -42,15 +43,9 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         fun onAutoCalibrate()
         fun onStop()
         fun onCalibrationDone(geometry: BoardGeometry)
-        /** User opened the editor (button) or asked for it from a "needs correction" status. */
-        fun onRequestReview()
-        /** Editor "Looks right": the shown reading is correct (teaches the theme model). */
-        fun onReviewConfirm()
-        /** Editor "Apply my fixes": the corrected board bits and the three tray slots (null = empty slot). */
-        fun onReviewApply(bits: Long, pieces: List<Piece?>)
-        fun onReviewCancel()
-        /** Forget what the assistant learned about the current theme. */
-        fun onResetTheme()
+        fun onFix()
+        fun onCorrectionDone(bits: Long, slotPieces: List<Piece?>)
+        fun onCorrectionCancelled()
     }
 
     private val ctx = ContextThemeWrapper(context, android.R.style.Theme_DeviceDefault)
@@ -65,7 +60,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     private lateinit var panelParams: WindowManager.LayoutParams
     private var highlightParams: WindowManager.LayoutParams? = null
     private var calibration: CalibrationView? = null
-    private var review: ReviewView? = null
+    private var correction: CorrectionView? = null
     private var added = false
 
     private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
@@ -113,7 +108,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
 
     fun destroy() {
         stopCalibration()
-        stopReview()
+        stopCorrection()
         if (added) {
             runCatching { wm.removeView(highlight) }
             runCatching { wm.removeView(panel) }
@@ -159,6 +154,30 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     fun setStatus(status: String, detail: String) {
         statusView.text = status
         detailView.text = detail
+    }
+
+    /** Highlights the Fix button when recognition is uncertain and the user's correction is needed. */
+    fun setFixNeeded(needed: Boolean) {
+        controls.findViewWithTag<Button>("fix")?.text = if (needed) "FIX!" else "Fix"
+    }
+
+    fun startCorrection(geometry: BoardGeometry, bits: Long, slotPieces: List<Piece?>) {
+        if (correction != null) return
+        val (w, h) = screenSize()
+        val view = CorrectionView(ctx, geometry, bits, slotPieces, { b, p -> stopCorrection(); callbacks.onCorrectionDone(b, p) }, { stopCorrection(); callbacks.onCorrectionCancelled() })
+        val lp = WindowManager.LayoutParams(
+            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        wm.addView(view, lp)
+        correction = view
+    }
+
+    private fun stopCorrection() {
+        correction?.let { runCatching { wm.removeView(it) } }
+        correction = null
     }
 
     fun setPausedLabel(paused: Boolean) {
@@ -218,14 +237,11 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         row2.addView(smallButton("Hide") { b -> b.text = if (callbacks.onToggleHighlights()) "Hide" else "Show" })
         row2.addView(smallButton("Cal") { callbacks.onCalibrate() })
         row2.addView(smallButton("Auto") { callbacks.onAutoCalibrate() })
+        row2.addView(smallButton("Fix", "fix") { callbacks.onFix() })
         row2.addView(smallButton("Stop") { callbacks.onStop() })
-        val row3 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        row3.addView(smallButton("Fix") { callbacks.onRequestReview() })
-        row3.addView(smallButton("Reset theme") { callbacks.onResetTheme() })
         controls.orientation = LinearLayout.VERTICAL
         controls.addView(row1)
         controls.addView(row2)
-        controls.addView(row3)
         panel.addView(controls)
 
         // Drag by the status line; tap it to collapse or expand.
@@ -282,40 +298,6 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     private fun stopCalibration() {
         calibration?.let { runCatching { wm.removeView(it) } }
         calibration = null
-    }
-
-    // ---- manual correction / confirmation -------------------------------------------------------------------------
-
-    /**
-     * Opens the editor over the board. Highlights are cleared first so no move is shown from an unconfirmed reading.
-     * [cellConfidence] (64 values) and [pieceConfidence] (per slot) only drive the red "unsure" outlines.
-     */
-    fun startReview(
-        geometry: BoardGeometry, bits: Long, cellConfidence: DoubleArray?, pieces: List<Piece?>,
-        pieceConfidence: List<Double>, confirmMode: Boolean,
-    ) {
-        if (review != null) return
-        clearHighlights()
-        val (w, h) = screenSize()
-        val view = ReviewView(
-            ctx, geometry, bits, cellConfidence, pieces, pieceConfidence, confirmMode, w,
-            onConfirm = { stopReview(); callbacks.onReviewConfirm() },
-            onApply = { b, p -> stopReview(); callbacks.onReviewApply(b, p) },
-            onCancel = { stopReview(); callbacks.onReviewCancel() },
-        )
-        val lp = WindowManager.LayoutParams(
-            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-        wm.addView(view, lp)
-        review = view
-    }
-
-    fun stopReview() {
-        review?.let { runCatching { wm.removeView(it) } }
-        review = null
     }
 
     // ---- views -----------------------------------------------------------------------------------------------------
@@ -448,6 +430,105 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
                     invalidate()
                 }
                 MotionEvent.ACTION_UP -> mode = 0
+            }
+            return true
+        }
+    }
+
+    /**
+     * Manual correction. Draws the recognized state over the game: tap a board cell to toggle occupied/empty, tap cells
+     * of the three 5x5 piece editors to fix the pieces. Touches here edit OUR data only; nothing is sent to the game.
+     */
+    private class CorrectionView(
+        context: Context,
+        private val geometry: BoardGeometry,
+        bits: Long,
+        slotPieces: List<Piece?>,
+        private val onDone: (Long, List<Piece?>) -> Unit,
+        private val onCancel: () -> Unit,
+    ) : FrameLayout(context) {
+        private var cellBits = bits
+        private val grids = Array(3) { BooleanArray(25) }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f; color = Color.CYAN }
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 38f }
+
+        init {
+            setWillNotDraw(false)
+            setBackgroundColor(Color.argb(110, 0, 0, 0))
+            for (slot in 0 until 3) slotPieces.getOrNull(slot)?.cells?.forEach { if (it.x < 5 && it.y < 5) grids[slot][it.y * 5 + it.x] = true }
+            val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            row.addView(Button(context).apply { text = "Confirm"; setOnClickListener { confirm() } })
+            row.addView(Button(context).apply { text = "Cancel"; setOnClickListener { onCancel() } })
+            addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = 120 })
+        }
+
+        private fun confirm() {
+            val pieces = grids.map { g ->
+                val cells = ArrayList<Cell>()
+                for (i in 0 until 25) if (g[i]) cells.add(Cell(i % 5, i / 5))
+                if (cells.isEmpty()) null else Piece(cells)
+            }
+            onDone(cellBits, pieces)
+        }
+
+        private fun miniCell() = 0.30f * geometry.cellSize
+        private fun gridOrigin(slot: Int): Pair<Float, Float> {
+            val m = miniCell()
+            return (width * (2 * slot + 1) / 6f - 2.5f * m) to (geometry.bottom + 0.6f * geometry.cellSize)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val loc = IntArray(2)
+            getLocationOnScreen(loc)
+            canvas.save()
+            canvas.translate(-loc[0].toFloat(), -loc[1].toFloat())
+            for (y in 0 until 8) for (x in 0 until 8) {
+                val r = geometry.cellRect(x, y)
+                val rect = RectF(r.left + 3, r.top + 3, r.right - 3, r.bottom - 3)
+                if ((cellBits ushr (y * 8 + x)) and 1L == 1L) {
+                    fillPaint.color = Color.argb(170, 40, 220, 110)
+                    canvas.drawRoundRect(rect, 8f, 8f, fillPaint)
+                }
+                canvas.drawRoundRect(rect, 8f, 8f, linePaint)
+            }
+            canvas.drawText("Tap board cells that are OCCUPIED. Edit the pieces below. Then Confirm.", geometry.left, max(60f, geometry.top - 24f), textPaint)
+            val m = miniCell()
+            for (slot in 0 until 3) {
+                val (ox, oy) = gridOrigin(slot)
+                for (i in 0 until 25) {
+                    val rx = ox + (i % 5) * m
+                    val ry = oy + (i / 5) * m
+                    val rect = RectF(rx + 2, ry + 2, rx + m - 2, ry + m - 2)
+                    fillPaint.color = if (grids[slot][i]) Color.argb(200, 255, 190, 60) else Color.argb(60, 255, 255, 255)
+                    canvas.drawRoundRect(rect, 4f, 4f, fillPaint)
+                }
+                canvas.drawText("piece ${slot + 1}", ox, oy - 8f, textPaint)
+            }
+            canvas.restore()
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            if (e.actionMasked != MotionEvent.ACTION_DOWN) return true
+            val x = e.rawX
+            val y = e.rawY
+            val cx = ((x - geometry.left) / geometry.cellSize).toInt()
+            val cy = ((y - geometry.top) / geometry.cellSize).toInt()
+            if (x >= geometry.left && y >= geometry.top && cx in 0..7 && cy in 0..7) {
+                cellBits = cellBits xor (1L shl (cy * 8 + cx))
+                invalidate()
+                return true
+            }
+            val m = miniCell()
+            for (slot in 0 until 3) {
+                val (ox, oy) = gridOrigin(slot)
+                val gx = ((x - ox) / m).toInt()
+                val gy = ((y - oy) / m).toInt()
+                if (x >= ox && y >= oy && gx in 0..4 && gy in 0..4) {
+                    grids[slot][gy * 5 + gx] = !grids[slot][gy * 5 + gx]
+                    invalidate()
+                    return true
+                }
             }
             return true
         }

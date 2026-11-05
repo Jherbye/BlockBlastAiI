@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Theme-independent recognition (gap-geometry locator, empty-look cell reader, background-relative tray reader), per-cell confidence, Fix (manual correction + theme learning), synthetic theme generator and robustness test. Uncompiled.
 - Locator rewritten to detect cell-gap valleys (fixes "lattice confidence too low" on a real screenshot); tray scale prior 0.5; local-only real-screenshot test.
 - Android app module (MediaProjection capture, floating overlay, solver integration), pure-Kotlin vision pipeline in `:core`, `build-apk` workflow. Uncompiled.
 - core now targets JVM 17 so the Android module can consume it.

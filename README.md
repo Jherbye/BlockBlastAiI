@@ -5,10 +5,8 @@ floating overlay. **It never taps, drags, or automates gameplay; the user makes 
 
 ## Status
 
-First functional version of the Android app; recognition is now **theme-independent** (adaptive, with a confirm/correct editor
-and no moves shown from unsure readings). The latest changes are **not compiled in the app module or run on a device**; see `docs/DEVELOPMENT_STATUS.md` and
-`docs/RECOGNITION.md` and `docs/ROBUSTNESS_REPORT.md` for exactly what is and is not verified. Recognition has been exercised on
-synthetic themes only, not on real gameplay screenshots of other themes.
+First functional version of the Android app, **never compiled or run yet**; see `docs/DEVELOPMENT_STATUS.md` and
+`docs/RECOGNITION.md` for exactly what is and is not verified. Recognition has been exercised on synthetic frames only.
 
 ## Install (debug APK)
 GitHub Actions builds it: open the `build-apk` run -> **Artifacts** -> `block-blast-assistant-debug-apk` -> unzip -> install
@@ -33,12 +31,12 @@ gradle wrapper --gradle-version 8.10.2   # one time, unless the wrapper is commi
 - `core/model` — `Board` (immutable 8x8 bitboard), `Piece` (normalized relative cells)
 - `core/rules` — placement, line clears, no-move detection; rule assumptions in `RuleConfig`
 - `core/solver` — `BaselineSolver` (exhaustive reference search), `BoardEvaluator` (heuristic weights)
-- `core/vision` — legacy baseline locator/classifier/extractor; `core/vision/adaptive` — theme-independent recognizer (used by the app)
+- `core/vision` — board locator, cell classifier, piece extractor, stability tracker, change detector
 - `app/` — Android app: MediaProjection capture service, overlay, UI
 - `docs/` — development status and recognition notes
 
 ## Known limitations
 - Game scoring is not modelled (unverified). Heuristic scores are search guides, not game scores.
 - Line-clear behaviour (simultaneous row/column clears, no rotation) is an unverified assumption.
-- Recognition is unvalidated on real screenshots; when unsure the app asks you to confirm/correct instead of showing moves.
+- Recognition is unvalidated on real screenshots; manual calibration is the fallback.
 - Suggestions only: the app never taps, swipes or automates the game.

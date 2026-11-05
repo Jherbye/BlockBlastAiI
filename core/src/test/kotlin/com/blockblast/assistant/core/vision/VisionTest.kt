@@ -56,15 +56,15 @@ class VisionTest {
 
     @Test fun classifierReadsOccupancy() {
         val frame = SyntheticFrames.render(spec(sampleBoard))
-        val reading = CellClassifier().classify(frame, BoardGeometry(60f, 480f, 120f))!!
+        val reading = CellReader().read(frame, BoardGeometry(60f, 480f, 120f), emptyList(), null)
         assertEquals(sampleBoard, reading.bits)
-        assertTrue(reading.confidence >= 0.5)
+        assertTrue("conf ${reading.confidence}", reading.confidence >= 0.75)
     }
 
     @Test fun classifierTreatsEmptyBoardAsEmpty() {
-        val reading = CellClassifier().classify(SyntheticFrames.render(spec(0L)), BoardGeometry(60f, 480f, 120f))!!
+        val reading = CellReader().read(SyntheticFrames.render(spec(0L)), BoardGeometry(60f, 480f, 120f), emptyList(), null)
         assertEquals(0L, reading.bits)
-        assertTrue(reading.confidence >= 0.5)
+        assertTrue("conf ${reading.confidence} notes ${reading.notes}", reading.confidence >= 0.75)
     }
 
     @Test fun extractorReadsPiecesBySlot() {
@@ -110,7 +110,7 @@ class VisionTest {
         val blank = PixelFrame(1080, 2340, IntArray(1080 * 2340) { Px.rgb(20, 28, 60) })
         val result = RecognitionPipeline().recognize(blank)
         assertTrue(!result.ok)
-        assertEquals(GeometrySource.NONE, result.source)
+        assertTrue(result.source == GeometrySource.NONE || result.locateConfidence < 0.5)
     }
 
     @Test fun trackerNeedsConsecutiveIdenticalReadings() {

@@ -20,6 +20,8 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.widget.Toast
 import com.blockblast.assistant.core.model.Board
+import com.blockblast.assistant.core.model.Piece
+import com.blockblast.assistant.core.vision.PixelFrame
 import com.blockblast.assistant.core.solver.BaselineSolver
 import com.blockblast.assistant.core.solver.CancellationToken
 import com.blockblast.assistant.core.solver.Recommendation
@@ -29,13 +31,11 @@ import com.blockblast.assistant.core.solver.SearchResult
 import com.blockblast.assistant.core.vision.BoardGeometry
 import com.blockblast.assistant.core.vision.ChangeDetector
 import com.blockblast.assistant.core.vision.FrameBaseline
-import com.blockblast.assistant.core.model.Piece
-import com.blockblast.assistant.core.vision.adaptive.AdaptiveRecognizer
-import com.blockblast.assistant.core.vision.adaptive.AdaptiveResult
-import com.blockblast.assistant.core.vision.adaptive.AdaptiveStability
-import com.blockblast.assistant.core.vision.adaptive.AdaptiveStateTracker
-import com.blockblast.assistant.core.vision.adaptive.AdaptiveVerified
-import com.blockblast.assistant.core.vision.adaptive.RecognitionStatus
+import com.blockblast.assistant.core.vision.RecognitionPipeline
+import com.blockblast.assistant.core.vision.RecognitionResult
+import com.blockblast.assistant.core.vision.Stability
+import com.blockblast.assistant.core.vision.StableStateTracker
+import com.blockblast.assistant.core.vision.VerifiedState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,29 +73,27 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private var solveJob: Job? = null
     private var solveToken: CancellationToken? = null
 
-    private val recognizer = AdaptiveRecognizer()
-    private val tracker = AdaptiveStateTracker(2)
+    private val pipeline = RecognitionPipeline()
+    private val tracker = StableStateTracker(2)
     private val detector = ChangeDetector()
     private val solver = BaselineSolver()
 
     // Logic-thread state
     private var mode = Mode.SCANNING
     private var scanDelayMs = 600L
-    private var verified: AdaptiveVerified? = null
-    private var lastResult: AdaptiveResult? = null
-    /** True once we have shown the editor for the current unsure episode (reset when a reading becomes READY). */
-    private var reviewPrompted = false
+    private var verified: VerifiedState? = null
     private var recs: List<Recommendation> = emptyList()
     private var recIndex = 0
     private var baseline: FrameBaseline? = null
     private var baselineDueAt = 0L
     private var changeStart = 0L
+    private var lastResult: RecognitionResult? = null
+    private var lastFrame: PixelFrame? = null
     private var stableTicks = 0
 
     // Written from the main thread
     @Volatile private var paused = false
     @Volatile private var calibrating = false
-    @Volatile private var reviewing = false
     @Volatile private var highlightsEnabled = true
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -166,7 +164,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private suspend fun runLoop() {
         while (currentCoroutineContext().isActive) {
             delay(if (mode == Mode.SCANNING) scanDelayMs else WATCH_MS)
-            if (paused || calibrating || reviewing) continue
+            if (paused || calibrating) continue
             try {
                 if (mode == Mode.SCANNING) cleanScan() else watch()
             } catch (e: CancellationException) {
@@ -197,79 +195,30 @@ class AssistantService : Service(), OverlayController.Callbacks {
             setStatus("Waiting for the first screen frame…", "")
             return
         }
-        recognizer.minConfidence = 0.45 + 0.20 * settings.sensitivityPercent / 100.0
+        pipeline.emptyLook = settings.emptyLook
         val manual = settings.manualGeometry(frame.width, frame.height)
-        val result = withContext(Dispatchers.Default) { recognizer.recognize(frame, manual) }
-        handleResult(result)
-    }
-
-    /** Single place that turns a recognition result into UI + solver activity. Moves are shown ONLY for READY. */
-    private suspend fun handleResult(result: AdaptiveResult) {
+        val result = withContext(Dispatchers.Default) { pipeline.recognize(frame, manual) }
         lastResult = result
+        lastFrame = frame
         publishRecognition(result)
         when (val st = tracker.offer(result)) {
-            is AdaptiveStability.Verified -> {
-                reviewPrompted = false
-                recognizer.onVerified(result)
-                onVerified(st.state)
-            }
-            is AdaptiveStability.Pending -> {
+            is Stability.Verified -> onVerified(st.state)
+            is Stability.Pending -> {
                 scanDelayMs = 450L
                 setStatus("Verifying board… (${st.seen}/${st.needed})", "")
             }
-            is AdaptiveStability.NotReady -> onNotReady(result, st)
-        }
-    }
-
-    private suspend fun onNotReady(result: AdaptiveResult, st: AdaptiveStability.NotReady) {
-        invalidateRecommendationsQuietly()
-        when (st.status) {
-            RecognitionStatus.NO_BOARD -> {
-                scanDelayMs = 1200L
-                reviewPrompted = false
-                setStatus("Board not found", "Open Block Blast with the whole board visible, or use Cal to align the grid by hand.")
-            }
-            RecognitionStatus.NO_PIECES -> {
-                scanDelayMs = 700L
-                setStatus("Waiting for pieces…", "Board read; no pieces visible yet.")
-            }
-            RecognitionStatus.NEEDS_CONFIRMATION, RecognitionStatus.NEEDS_CORRECTION -> {
-                scanDelayMs = 1500L
-                val confirm = st.status == RecognitionStatus.NEEDS_CONFIRMATION
-                setStatus(
-                    if (confirm) "New theme - please confirm the board" else "Recognition needs correction",
-                    "No moves are shown from an unsure reading. Tap Fix to check it. ${st.reason}",
-                )
-                if (!reviewPrompted && result.geometry != null) {
-                    reviewPrompted = true
-                    openReview(result)
+            is Stability.Rejected -> {
+                // Never show moves from a doubtful reading; back off so the panel does not flicker constantly.
+                scanDelayMs = minOf(4000L, maxOf(900L, (scanDelayMs * 1.5).toLong()))
+                clearHighlightsOnMain()
+                withContext(Dispatchers.Main) { ov.setFixNeeded(result.needsCorrection) }
+                if (result.needsCorrection) {
+                    setStatus("Recognition needs correction - tap Fix", st.reason)
+                } else {
+                    setStatus("Cannot read the screen reliably", st.reason + " (use Cal to align the board)")
                 }
             }
-            RecognitionStatus.READY -> Unit
         }
-    }
-
-    private suspend fun invalidateRecommendationsQuietly() {
-        solveToken?.cancel()
-        solveJob?.cancel()
-        recs = emptyList()
-        verified = null
-        clearHighlightsOnMain()
-        AssistantState.update { it.copy(recommendationCount = 0) }
-    }
-
-    /** Opens the correction editor with what was read, low-confidence cells and pieces marked. */
-    private suspend fun openReview(result: AdaptiveResult) {
-        val g = result.geometry ?: return
-        val ov = overlay ?: return
-        val bySlot = MutableList<Piece?>(3) { null }
-        val confBySlot = MutableList(3) { 1.0 }
-        result.pieces.forEach { if (it.slot in 0..2) { bySlot[it.slot] = it.piece; confBySlot[it.slot] = it.confidence } }
-        val cellConf = result.cells?.confidence
-        val bits = result.bits ?: 0L
-        val confirmMode = result.status == RecognitionStatus.NEEDS_CONFIRMATION
-        reviewing = true
-        withContext(Dispatchers.Main) { ov.startReview(g, bits, cellConf, bySlot, confBySlot, confirmMode) }
     }
 
     private suspend fun watch() {
@@ -319,7 +268,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         AssistantState.update { it.copy(recommendationCount = 0, lastTransition = reason) }
     }
 
-    private suspend fun onVerified(state: AdaptiveVerified) {
+    private suspend fun onVerified(state: VerifiedState) {
         mode = Mode.WATCHING
         verified = state
         changeStart = 0L
@@ -330,7 +279,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         startSolve(state)
     }
 
-    private fun startSolve(state: AdaptiveVerified) {
+    private fun startSolve(state: VerifiedState) {
         solveToken?.cancel()
         solveJob?.cancel()
         val token = CancellationToken()
@@ -344,7 +293,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         }
     }
 
-    private suspend fun onSolved(result: SearchResult, state: AdaptiveVerified) {
+    private suspend fun onSolved(result: SearchResult, state: VerifiedState) {
         recs = Recommender.from(result, 12)
         recIndex = 0
         AssistantState.update {
@@ -386,7 +335,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
             overlay?.onScreenChanged()
             overlay?.clearHighlights()
         }
-        recognizer.clearGeometryCache()
+        pipeline.clearCache()
         tracker.reset()
         verified = null
         recs = emptyList()
@@ -459,7 +408,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         val (w, h, _) = displayInfo()
         settings.setManualGeometry(geometry, w, h)
         calibrating = false
-        recognizer.clearGeometryCache()
+        pipeline.clearCache()
         scope.launch {
             tracker.reset()
             mode = Mode.SCANNING
@@ -470,7 +419,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
 
     override fun onAutoCalibrate() {
         settings.clearManualGeometry()
-        recognizer.clearGeometryCache()
+        pipeline.clearCache()
         scope.launch {
             tracker.reset()
             mode = Mode.SCANNING
@@ -479,65 +428,48 @@ class AssistantService : Service(), OverlayController.Callbacks {
         }
     }
 
-    override fun onRequestReview() {
+    override fun onFix() {
         scope.launch {
-            val r = lastResult
-            if (r?.geometry == null) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@AssistantService, "No board found yet - use Cal to align the grid first", Toast.LENGTH_LONG).show()
-                }
+            val res = lastResult
+            val frame = lastFrame
+            val g = res?.geometry ?: verified?.geometry
+            if (res == null || g == null || frame == null) {
+                withContext(Dispatchers.Main) { overlay?.setStatus("Cannot fix yet", "Use Cal to align the board first, then Fix.") }
                 return@launch
             }
-            solveToken?.cancel()
-            openReview(r)
+            val slotPieces = arrayOfNulls<Piece>(3)
+            res.pieces?.pieces?.forEach { slotPieces[it.slot] = it.piece }
+            calibrating = true // pause scanning while the user edits
+            withContext(Dispatchers.Main) { overlay?.startCorrection(g, res.board?.bits ?: 0L, slotPieces.toList()) }
         }
     }
 
-    override fun onReviewConfirm() {
-        scope.launch {
-            val r = withContext(Dispatchers.Default) { recognizer.confirm() }
-            afterReview(r, "board confirmed by the user")
-        }
+    override fun onCorrectionCancelled() {
+        calibrating = false
     }
 
-    override fun onReviewApply(bits: Long, pieces: List<Piece?>) {
+    override fun onCorrectionDone(bits: Long, slotPieces: List<Piece?>) {
         scope.launch {
-            val r = withContext(Dispatchers.Default) { recognizer.correct(bits, pieces) }
-            afterReview(r, "board/pieces corrected by the user")
-        }
-    }
-
-    override fun onReviewCancel() {
-        scope.launch {
-            reviewing = false
+            calibrating = false
+            val g = lastResult?.geometry ?: verified?.geometry ?: return@launch
+            val pieces = ArrayList<Piece>()
+            val slots = ArrayList<Int>()
+            slotPieces.forEachIndexed { i, p -> if (p != null) { pieces.add(p); slots.add(i) } }
+            lastFrame?.let {
+                pipeline.learn(it, g, bits) // learn this theme's empty look from the confirmed board
+                settings.emptyLook = pipeline.emptyLook
+            }
+            if (pieces.isEmpty()) {
+                setStatus("No pieces entered", "Add at least one piece in Fix, then confirm.")
+                return@launch
+            }
             tracker.reset()
-            mode = Mode.SCANNING
-            scanDelayMs = 1500L
+            AssistantState.update {
+                it.copy(needsCorrection = false, learnedTheme = pipeline.emptyLook != null, lastTransition = "board and pieces confirmed by the user")
+            }
+            withContext(Dispatchers.Main) { overlay?.setFixNeeded(false) }
+            onVerified(VerifiedState(bits, g, pieces, slots))
         }
-    }
-
-    override fun onResetTheme() {
-        scope.launch {
-            recognizer.resetTheme()
-            tracker.reset()
-            reviewPrompted = false
-            mode = Mode.SCANNING
-            scanDelayMs = 100L
-            AssistantState.update { it.copy(lastTransition = "learned theme forgotten", themeModelActive = false) }
-        }
-    }
-
-    private suspend fun afterReview(r: AdaptiveResult?, what: String) {
-        reviewing = false
-        if (r == null) {
-            setStatus("Nothing to correct yet", "Waiting for a fresh screen reading.")
-            mode = Mode.SCANNING
-            scanDelayMs = 300L
-            return
-        }
-        AssistantState.update { it.copy(lastTransition = what) }
-        mode = Mode.SCANNING
-        handleResult(r)
     }
 
     override fun onStop() {
@@ -568,26 +500,25 @@ class AssistantService : Service(), OverlayController.Callbacks {
         else -> "right"
     }
 
-    private fun publishRecognition(r: AdaptiveResult) {
-        val rows = r.board?.toRows() ?: emptyList()
-        val pieceLines = r.pieces.map { p ->
-            "slot ${p.slot} (conf %.2f): ".format(p.confidence) + p.piece.cells.joinToString(" ") { "(${it.x},${it.y})" }
-        }
+    private fun publishRecognition(r: RecognitionResult) {
+        val rows = r.board?.let { Board.ofBits(it.bits).toRows() } ?: emptyList()
+        val pieceLines = r.pieces?.pieces?.map { dp ->
+            "slot ${dp.slot}: " + dp.piece.cells.joinToString(" ") { "(${it.x},${it.y})" }
+        } ?: emptyList()
         val g = r.geometry
         val geo = if (g == null) "not found" else
-            "left=%.1f top=%.1f cell=%.1f (%s, grid conf %.2f)".format(g.left, g.top, g.cellSize, r.geometrySource.name.lowercase(), r.geometryConfidence)
+            "left=%.1f top=%.1f cell=%.1f (%s, locate conf %.2f)".format(g.left, g.top, g.cellSize, r.source.name.lowercase(), r.locateConfidence)
         AssistantState.update {
             it.copy(
                 boardRows = rows,
                 pieceLines = pieceLines,
                 geometryText = geo,
                 recognitionConfidence = r.confidence,
-                stateHash = r.bits?.let { b -> java.lang.Long.toHexString(b) } ?: "-",
+                needsCorrection = r.needsCorrection,
+                lowConfidenceCells = r.board?.cellConfidence?.count { c -> c < 0.75 } ?: 0,
+                learnedTheme = pipeline.emptyLook != null,
+                stateHash = r.board?.let { b -> java.lang.Long.toHexString(b.bits) } ?: "-",
                 notes = r.notes.joinToString("; ").ifEmpty { "-" },
-                recognitionStatus = r.status.name,
-                unsureCells = r.lowConfidenceCells.size,
-                unsurePieces = r.lowConfidencePieceSlots.size,
-                themeModelActive = r.themeModelActive,
             )
         }
     }

@@ -1,69 +1,54 @@
-# Recognition design and honest status
+# Theme-independent recognition: design, implementation status, validation status
 
-Everything runs on-device in pure Kotlin (no OpenCV, no external AI API). Frames are analysed in memory and never saved.
-Numbers: `docs/ROBUSTNESS_REPORT.md`. **Implemented is not the same as validated; see the two tables at the end.**
+Everything runs offline on the device, in pure Kotlin (no OpenCV, no external AI API). Frames stay in memory.
+**Nothing below assumes a colour, texture, background or theme.** Where a number appears (e.g. 0.2 cell), it is relative
+to the detected cell size or to the measured dynamic range of the screen being analysed.
 
-## Principle
-The game can change theme and block appearance, so nothing may depend on absolute colours, textures or one background.
-Thresholds are colour DIFFERENCES (CIE Lab dE) or ratios; the board is found from periodic geometry; blocks are found by
-how a cell differs from the other cells and from the board structure; shapes come from occupied squares.
+## Signals and how they are combined
 
-## Active pipeline (`core/.../vision/adaptive`, used by the app)
-1. `LabImage` - downscaled Lab planes, gradients, integral images (O(1) region stats).
-2. `GridDetector` - 8x8 lattice from edge-energy periodicity (comb score on lattice lines vs. mid-cell, polarity free),
-   sub-pixel line regression with a shared pitch, extent test (the lattice must stop at the board), autocorrelation hint.
-   Gives geometry + confidence. No background colour is assumed.
-3. `CellFeatures` / `CellAnalyzer` - per-cell colour, texture, relief and lattice-contrast features; plane detrending (gradients),
-   checkerboard parity normalisation; an unsupervised "tight densest group + outliers" split fused over several signals
-   with conflict detection; orientation vote for which group is "occupied" (minority, chroma, texture, tray colours).
-   Per-cell confidence. A uniform board is handled as such.
-4. `ThemeModel` - one-class model of what EMPTY cells look like in the current theme, learned only from verified,
-   high-confidence or user-confirmed/corrected states. Once ready it replaces the unsupervised split. A theme change drops it.
-5. `TrayReader` - per-row and global background modes, closing/hole fill, connected components, shadow removal, one common
-   cell pitch from a whole-number fit + lattice support + learned tray/board ratio (ambiguity is reported), shape from
-   occupied sub-squares, contrast-capped confidence. Shapes that are dropped, merged with the background, or run into a
-   banner / band edge are NOT silent: they add a note and cap confidence so the reading abstains.
-6. `TemporalFusion` / `TransitionValidator` - per-cell stability across frames, inconsistency cap, and a check that a change
-   between states is explainable by one move (RulesEngine).
-7. `AdaptiveRecognizer` - combines all of it into a `RecognitionStatus`:
-   `READY` (moves may be shown), `NEEDS_CONFIRMATION` (new theme, occupancy was inferred), `NEEDS_CORRECTION`,
-   `NO_PIECES`, `NO_BOARD`. Also a plausibility check (no full rows/columns on a settled board).
-8. `AdaptiveStateTracker` - requires 2 consecutive identical READY readings (user-corrected states are accepted at once).
+| Stage | Signals used | Why it is theme independent |
+|---|---|---|
+| Board geometry (`BoardLocator`) | periodicity of narrow luminance dips/bumps (cell gaps), both polarities; row/column "gap-line energy" windows that decide which 8x8 cells are the board; sub-pixel regression | profiles are normalised by their own 5-95% range; only relative depth of a narrow gap is used; light or dark gaps both work |
+| Cell occupancy (`CellReader`) | per-cell mean colour, texture (luma std), edge density, ring contrast (inner area vs rim); clustering of cells into "looks"; cues for which look is EMPTY: closeness to the grid-gap colour, low texture, distance from tray-piece colours, cluster size, learned empty look from confirmed boards | occupied = differs from the board's own empty look in ANY feature; hue-agnostic; the empty look is inferred from the screen, then learned from user corrections |
+| Tray pieces (`PieceExtractor`) | per-row background colour (median, edge fallback), colour distance + Otsu threshold with noise-relative floors, loose mask (connectivity) and strict mask (shape, ignores soft shadows), connected components, whole-number cell fit across blobs, per-cell sampling, empty-slot cross-check | foreground is "differs from the local background", not a colour; tray cell size is measured |
+| Temporal (`StableStateTracker`, `ChangeDetector`, `CellReader` model) | state must repeat in 2 consecutive clean scans; cheap change detector ignores our own overlay; learned empty look carries across scans | filters animations and drags; adapts to the theme in use |
+| Confidence | per-cell, per-piece, geometry; acceptance needs geometry >= 0.5, board (2nd-lowest cell) >= 0.75, pieces >= 0.5 | anything less is NOT shown as a recommendation |
 
-## Never guess silently
-Moves are drawn ONLY for READY. For any other status the overlay clears highlights, the panel says why, and the correction
-editor opens (once per unsure episode; "Fix" reopens it). The editor (`ReviewView`) shows the reading with low-confidence
-cells/pieces outlined in red; the user toggles board cells and 5x5 piece grids, then "Apply my fixes" or, for a new theme,
-"Looks right". The corrected state is used immediately and teaches `ThemeModel`. "Reset theme" forgets what was learned.
-"Cal" (manual grid alignment) and "Auto" still exist. The editor edits only the assistant's own reading; it never sends
-input to the game (it is modal while open so a stray tap cannot reach the game). No taps, drags or gestures are injected.
+## Uncertainty, calibration, correction (never a silent guess)
+- Low confidence => no highlights, the panel says why, and **Fix** turns into **FIX!**.
+- **Cal**: drag/resize a grid over the board (manual geometry; overrides automatic detection; **Auto** reverts).
+- **Fix**: shows the recognized state over the game. Tap board cells to toggle occupied/empty, tap cells of the three
+  5x5 editors to correct pieces, Confirm. The corrected state is used immediately and the app **learns the theme's
+  empty look** from it (stored on the phone; "Forget learned theme" in the main screen clears it).
+- These touches edit the app's own data only. Nothing is ever sent to the game.
 
-## Overlay vs. capture
-Unchanged: both overlay windows are hidden before each scan, a fresh frame is grabbed, windows restored; `ChangeDetector`
-watches between scans, ignoring our own overlay regions. Highlights use the detected (or calibrated) geometry, so they stay
-aligned with the real board.
+## IMPLEMENTED (code exists)
+All of the above. Overlay is hidden during each full scan so it never contaminates the reading.
 
-## Legacy pipeline
-`BoardLocator`/`CellClassifier`/`PieceExtractor`/`RecognitionPipeline` (fixed assumptions: dark gaps, brighter blocks) are
-kept only as a baseline for the benchmark and for `RealScreenshotTest`; the app no longer uses them.
+## VALIDATED against actual gameplay screenshots
+- **One** real screenshot (chocolate/heart theme, 1080x2400, ad banner, overlay panel on screen): in a Python mirror of
+  the algorithms the geometry (61.9 / 579.8 / cell 119.0), all 64 cells and all three tray pieces are read exactly, and the
+  result is accepted. The same real image is also checked by `RealScreenshotTest` (local only; real screenshots are not
+  committed; set `BLOCKBLAST_REAL_SCREENSHOTS`). The first APK failed on that screenshot ("lattice confidence 0.17"),
+  which led to the gap-based locator.
+- No other real theme has been tested. **Accuracy on other real themes is unknown.**
 
-## IMPLEMENTED (code exists, unit/benchmark tested in the JVM)
-All of the above, the editor UI, and the service integration.
+## VALIDATED only on SYNTHETIC themes (not real gameplay)
+`ThemeScenes` generates random themes (light/dark; solid, gradient or noisy backgrounds; visible or no board panel; gap
+width and polarity; flat, gradient, textured or inset empty cells; flat, gradient, textured, bevel, outline or decal
+blocks; corner radius; tray scale and shadows; display brightness/contrast; pixel noise; 5 resolutions/aspect ratios;
+header clutter; ad banner) plus two adversarial kinds ("lowcontrast": blocks about as bright as empty cells;
+"samecolor": blocks the same colour as empty cells). `ThemeRobustnessTest` measures geometry, board-cell accuracy,
+piece-shape accuracy, acceptance rate, confidence and confident-wrong rate, and writes
+`core/build/reports/theme-robustness.txt` (uploaded by CI).
 
-## VALIDATED against real gameplay screenshots
-- **Adaptive pipeline: nothing.** No real screenshot was available in this work; it has never seen real Block Blast.
-- Legacy pipeline: one real screenshot (chocolate/heart theme, supplied earlier) was read correctly by a Python mirror;
-  the Kotlin port and `RealScreenshotTest` (env `BLOCKBLAST_REAL_SCREENSHOTS`) were not run against it. Run that test
-  with the adaptive recognizer too before trusting it.
-- Synthetic only: 12 development themes, random held-out and sealed themes, brightness/gamma/noise/blur/scaling/resolution
-  perturbations. See the report.
-- The `:app` module (service, overlay, editor) was NOT compiled here (no Android SDK in this environment). It is written
-  against the same APIs as the previously CI-built code, but expect possible compile errors on first CI run.
+Prototype (Python, same algorithms) on 240 synthetic scenes, the reference for what to expect:
+- Accepted 94 of 240 (39%); **5 of the 94 accepted scenes contained an error** (cells, a piece set, or geometry),
+  i.e. the system is NOT safe to trust blindly on hard themes; the correction UI exists for that reason.
+- Board-cell accuracy given acceptance about 99.8%; geometry succeeded on about 75% of scenes (the rest are flagged).
+- Hard kinds are mostly flagged rather than guessed: low-contrast accepted 17%, same-colour accepted 20% (one same-colour
+  scene was accepted with the whole board inverted).
+- Known weak spots: gradient-shaded tiles bias the grid by up to ~0.1 cell; themes whose panel colour lies between the
+  empty and block colours weaken the gap signal; textured/noisy backgrounds lower geometry confidence.
 
-## Assumptions real screenshots may break
-- Board is an 8x8 lattice with visible cell structure (edges/relief/colour differences), roughly square.
-- Tray pieces sit below the board, edge-connected, <=5x5, one common cell pitch, slots roughly aligned to board thirds.
-- The shape catalog in `ShapeCatalog` is an assumption (unknown shapes only lower confidence, never block).
-- Animations, particles, combo text, ads over the tray, and drag previews are handled only by the stability rule and
-  abstention; none were tested.
-- Per-cell contrast inside a piece is not checked (see the known failure in the report).
+The Kotlin port has not yet been executed anywhere; the first CI run produces the Kotlin numbers.

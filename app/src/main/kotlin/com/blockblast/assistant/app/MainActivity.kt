@@ -76,7 +76,13 @@ class MainActivity : Activity() {
         root.addView(text("Settings", 16f, true))
         root.addView(seek("Overlay opacity", 10, 95, settings.opacityPercent) { settings.opacityPercent = it })
         root.addView(seek("Search time (ms)", 100, 3000, settings.searchMillis) { settings.searchMillis = it })
-        root.addView(seek("Recognition strictness (higher = asks you to check more often)", 0, 100, settings.sensitivityPercent) { settings.sensitivityPercent = it })
+        root.addView(Button(this).apply {
+            text = "Forget learned theme (re-learn from the next correction)"
+            setOnClickListener {
+                settings.emptyLook = null
+                Toast.makeText(this@MainActivity, "Learned theme cleared", Toast.LENGTH_SHORT).show()
+            }
+        })
         root.addView(CheckBox(this).apply {
             text = "Show numbered follow-up moves"
             isChecked = settings.showSequence
@@ -143,10 +149,7 @@ class MainActivity : Activity() {
             appendLine("Pieces:")
             if (s.pieceLines.isEmpty()) appendLine("  -") else s.pieceLines.forEach { appendLine("  $it") }
             appendLine("Calibration: ${s.geometryText}")
-            appendLine("Confidence: %.2f".format(s.recognitionConfidence))
-            appendLine("Recognition status: ${s.recognitionStatus}")
-            appendLine("Unsure cells: ${s.unsureCells}, unsure pieces: ${s.unsurePieces}")
-            appendLine("Learned theme model: ${if (s.themeModelActive) "active" else "not yet"}")
+            appendLine("Confidence: %.2f   needs correction: ${s.needsCorrection}   doubtful cells: ${s.lowConfidenceCells}   learned theme: ${s.learnedTheme}".format(s.recognitionConfidence))
             appendLine("Search: ${s.searchMillis} ms, ${s.nodes} nodes, ${if (s.searchCompleted) "completed" else "budget reached"}")
             appendLine("Recommendations: ${s.recommendationCount}")
             appendLine("State hash: ${s.stateHash}")

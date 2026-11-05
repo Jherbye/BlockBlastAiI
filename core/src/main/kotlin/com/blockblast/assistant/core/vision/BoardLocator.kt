@@ -1,5 +1,7 @@
 package com.blockblast.assistant.core.vision
 
+import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -7,173 +9,205 @@ import kotlin.math.roundToInt
 data class LocateResult(val geometry: BoardGeometry, val confidence: Double)
 
 /**
- * Finds the 8x8 grid without any device-specific coordinates, by its GAPS.
+ * Theme-independent board detection from grid GEOMETRY only (no colours, textures or fixed coordinates).
  *
- * The cell gaps form 9 evenly spaced vertical and 9 evenly spaced horizontal dark valleys in the luminance profile.
- * Averaging luminance over many rows (or columns) suppresses background texture and decals, so the valleys of the
- * 8x8 lattice stand out. Steps:
- *  1. Column profile (mean luminance over a vertical band, several bands tried) -> best (cell size, offset) lattice
- *     scored on the 7 INTERIOR lines, with a penalty if the lines one cell OUTSIDE the board are also valleys.
- *  2. Vertical placement: per-row energy of the 7 vertical gap lines is high only on board rows, so the 8-cell-tall
- *     window with the most energy fixes which rows are the board (this removes the "shifted by one cell" ambiguity).
- *  3. Exact top edge from the row profile (valley lattice, offsets restricted near step 2); sub-pixel regression.
+ * Cell gaps form 9 evenly spaced lines in each direction. A gap is a NARROW local dip (dark gaps) or bump (light gaps)
+ * in luminance, so everything is expressed relative to the profile's own dynamic range (brightness / contrast /
+ * resolution independent), and both polarities are tried.
+ *  1. Column profiles over several vertical bands -> cell size and grid phase from the periodicity of narrow dips.
+ *  2. Which 8 rows? Energy of ALL vertical gap lines per screen row; the 8-cell window with most energy is the board.
+ *  3. Exact top from the row profile (restricted near step 2); which 8 columns? Energy of the horizontal gap lines per
+ *     screen column, same window logic; exact left from the column profile.
+ * Confidence combines dip strength, the fraction of lines that are real dips, and inside/outside energy contrast.
  *
- * Validated on one real screenshot (chocolate/heart theme, 1080x2400) plus synthetic frames. Other themes and layouts
- * are untested; manual calibration is the fallback.
+ * Known limits: gradient-shaded tiles bias the grid by up to ~0.1 cell; very low gap contrast fails (-> low
+ * confidence -> manual calibration). Validated on one real screenshot and on procedurally generated themes only.
  */
 class BoardLocator(private val downscale: Int = 2) {
+
+    private class Scan(val cell: Double, val offset: Double, val score: Double, val fraction: Double)
 
     fun locate(frame: PixelFrame): LocateResult? {
         val d = downscale
         val w = frame.width / d
         val h = frame.height / d
         if (w < 80 || h < 80) return null
-
         val luma = DoubleArray(w * h)
         val area = (d * d).toDouble()
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                var sum = 0
-                for (dy in 0 until d) for (dx in 0 until d) sum += frame.luma(x * d + dx, y * d + dy)
-                luma[y * w + x] = sum / area
-            }
+        for (y in 0 until h) for (x in 0 until w) {
+            var sum = 0
+            for (dy in 0 until d) for (dx in 0 until d) sum += frame.luma(x * d + dx, y * d + dy)
+            luma[y * w + x] = sum / area
         }
 
-        // 1. columns: try several vertical bands, keep the strongest lattice
+        // 1. cell size and phase
         val bandH = (0.30 * h).toInt()
         val bandStep = max(1, (0.05 * h).toInt())
-        var best: Lattice? = null
+        var best: Scan? = null
         var bestTop = 0
+        var bestPol = 1
+        var bestLo = 0.0
+        var bestR = 1.0
         var top = (0.05 * h).toInt()
         while (top + bandH <= (0.75 * h).toInt()) {
-            val profile = meanOverRows(luma, w, top, top + bandH)
-            val r = bestValley(profile, 0.60 * w / 8.0, 0.98 * w / 8.0, 0.25, 0, w - 1.0)
-            if (r != null && (best == null || r.score > best.score)) {
-                best = r
-                bestTop = top
+            val prof = meanOverRows(luma, w, top, top + bandH)
+            val (lo, r) = range(prof)
+            for (pol in intArrayOf(1, -1)) {
+                val q = DoubleArray(w) { val v = (prof[it] - lo) / r * 100.0; if (pol > 0) v else 100.0 - v }
+                val res = valleyScan(q, 0.60 * w / 8.0, 0.98 * w / 8.0, 0.25, 0, w - 1.0)
+                if (res != null && (best == null || res.score > best.score)) {
+                    best = res; bestTop = top; bestPol = pol; bestLo = lo; bestR = r
+                }
             }
             top += bandStep
         }
-        val colLattice = best ?: return null
-        val colProfile = meanOverRows(luma, w, bestTop, bestTop + bandH)
-        val (s, colOffset) = refine(colProfile, colLattice.cell, colLattice.offset)
+        val first = best ?: return null
+        val prof0 = meanOverRows(luma, w, bestTop, bestTop + bandH)
+        val q0 = DoubleArray(w) { val v = (prof0[it] - bestLo) / bestR * 100.0; if (bestPol > 0) v else 100.0 - v }
+        val (s, off) = refine(q0, first.cell, first.offset)
+        val phase = off - floor(off / s) * s
 
-        // 2. rows: which 8-cell-tall window holds the vertical gap lines?
-        val half = 0.5 * s
-        val energy = DoubleArray(h)
-        for (i in 1..7) {
-            val xi = colOffset + i * s
-            val xa = (xi - half).roundToInt().coerceIn(0, w - 1)
-            val xb = (xi + half).roundToInt().coerceIn(0, w - 1)
+        val norm = DoubleArray(w * h) { val v = (luma[it] - bestLo) / bestR * 100.0; if (bestPol > 0) v else 100.0 - v }
+        val hh = 0.2 * s
+        val span = (8 * s).roundToInt()
+
+        // 2. which 8 rows
+        val xs = ArrayList<Double>()
+        var k = 0
+        while (phase + k * s <= w) {
+            val pos = phase + k * s
+            if (pos >= 0.5 * s && pos <= w - 0.5 * s) xs.add(pos)
+            k++
+        }
+        val rowEnergy = DoubleArray(h)
+        for (xi in xs) {
+            val xa = (xi - hh).roundToInt().coerceIn(0, w - 1)
+            val xb = (xi + hh).roundToInt().coerceIn(0, w - 1)
             val c0 = xi.roundToInt()
-            val cLo = max(0, c0 - 2)
-            val cHi = min(w - 1, c0 + 2)
             for (y in 0 until h) {
                 val base = y * w
-                var m = luma[base + c0.coerceIn(0, w - 1)]
-                for (x in cLo..cHi) if (luma[base + x] < m) m = luma[base + x]
-                energy[y] += (0.5 * (luma[base + xa] + luma[base + xb]) - m).coerceIn(0.0, 60.0)
+                var m = Double.MAX_VALUE
+                for (x in max(0, c0 - 2)..min(w - 1, c0 + 2)) if (norm[base + x] < m) m = norm[base + x]
+                rowEnergy[y] += (min(norm[base + xa], norm[base + xb]) - m).coerceIn(0.0, 40.0)
             }
         }
-        val prefix = DoubleArray(h + 1)
-        for (y in 0 until h) prefix[y + 1] = prefix[y] + energy[y] / 7.0
-        val span = (8 * s).roundToInt()
-        val lo = (0.04 * h).toInt()
-        val hi = (0.95 * h).toInt() - span
-        if (hi < lo) return null
-        var off0 = lo
-        var bestSum = -1.0
-        for (o in lo..hi) {
-            val sum = prefix[o + span] - prefix[o]
-            if (sum > bestSum) {
-                bestSum = sum
-                off0 = o
-            }
-        }
+        if (xs.isNotEmpty()) for (y in 0 until h) rowEnergy[y] /= xs.size
+        val wy = bestWindow(rowEnergy, span, (0.02 * h).toInt(), (0.97 * h).toInt() - span) ?: return null
 
-        // 3. exact top edge from the row profile, close to off0
-        val x0 = max(0, (colOffset + s).roundToInt())
-        val x1 = min(w, (colOffset + 7 * s).roundToInt())
-        if (x1 - x0 < 8) return null
-        val rowProfile = DoubleArray(h)
-        for (y in 0 until h) {
-            var sum = 0.0
-            for (x in x0 until x1) sum += luma[y * w + x]
-            rowProfile[y] = sum / (x1 - x0)
-        }
-        val rowLattice = bestValley(
-            rowProfile, s, s, 0.25,
-            max(lo, (off0 - s / 3.0).toInt()),
-            min((0.95 * h).toInt().toDouble(), off0 + s / 3.0 + span),
+        // 3a. exact top
+        val rowProf = DoubleArray(h) { y -> var sum = 0.0; for (x in 0 until w) sum += norm[y * w + x]; sum / w }
+        val rowScan = valleyScan(
+            rowProf, s, s, 0.25,
+            max((0.02 * h).toInt(), (wy.index - s / 3.0).toInt()),
+            min((0.97 * h).toInt(), (wy.index + s / 3.0 + span).toInt()).toDouble(),
         ) ?: return null
-        val rowOffset = refine(rowProfile, s, rowLattice.offset).second
+        val rowOffset = refine(rowProf, s, rowScan.offset).second
 
-        val geometry = BoardGeometry(
-            left = (colOffset * d).toFloat(),
-            top = (rowOffset * d).toFloat(),
-            cellSize = (s * d).toFloat(),
+        // 3b. which 8 columns, exact left
+        val colEnergy = DoubleArray(w)
+        for (j in 1..7) {
+            val yi = rowOffset + j * s
+            val ya = (yi - hh).roundToInt().coerceIn(0, h - 1)
+            val yb = (yi + hh).roundToInt().coerceIn(0, h - 1)
+            val c0 = yi.roundToInt()
+            for (x in 0 until w) {
+                var m = Double.MAX_VALUE
+                for (y in max(0, c0 - 2)..min(h - 1, c0 + 2)) if (norm[y * w + x] < m) m = norm[y * w + x]
+                colEnergy[x] += (min(norm[ya * w + x], norm[yb * w + x]) - m).coerceIn(0.0, 40.0)
+            }
+        }
+        for (x in 0 until w) colEnergy[x] /= 7.0
+        val wx = bestWindow(colEnergy, span, 0, w - span) ?: return null
+        val kx = ((wx.index - phase) / s).roundToInt()
+        val leftGuess = phase + kx * s
+        val y0 = rowOffset.toInt().coerceIn(0, h - 1)
+        val y1 = (rowOffset + 8 * s).toInt().coerceIn(y0 + 1, h)
+        val colProf = meanOverRows(norm, w, y0, y1)
+        val colScan = valleyScan(
+            colProf, s, s, 0.25,
+            max(0, (leftGuess - s / 3.0).toInt()),
+            min(w - 1, (leftGuess + s / 3.0 + span).toInt()).toDouble(),
         )
+        val left = if (colScan != null) refine(colProf, s, colScan.offset).second else leftGuess
+
+        val contrast = min(wy.inside / (wy.outside + 2.0), wx.inside / (wx.outside + 2.0))
+        val conf = min(1.0, min(first.score, rowScan.score) / 12.0) *
+            min(first.fraction, rowScan.fraction) * min(1.0, contrast / 3.0)
+        val geometry = BoardGeometry((left * d).toFloat(), (rowOffset * d).toFloat(), (s * d).toFloat())
         if (geometry.left < -d || geometry.top < -d || geometry.right > frame.width + d || geometry.bottom > frame.height + d) return null
-        val strength = (min(colLattice.score, rowLattice.score) / 20.0).coerceIn(0.0, 1.0)
-        return LocateResult(geometry, strength * min(colLattice.fraction, rowLattice.fraction))
+        return LocateResult(geometry, conf.coerceIn(0.0, 1.0))
     }
 
-    private class Lattice(val cell: Double, val offset: Double, val score: Double, val fraction: Double)
+    private class Window(val index: Int, val inside: Double, val outside: Double)
 
-    private fun meanOverRows(luma: DoubleArray, w: Int, from: Int, to: Int): DoubleArray {
-        val out = DoubleArray(w)
-        for (y in from until to) {
-            val base = y * w
-            for (x in 0 until w) out[x] += luma[base + x]
+    private fun bestWindow(e: DoubleArray, span: Int, lo: Int, hi: Int): Window? {
+        if (hi < lo || span <= 0) return null
+        val pre = DoubleArray(e.size + 1)
+        for (i in e.indices) pre[i + 1] = pre[i] + e[i]
+        var bestK = lo
+        var bestSum = -1.0
+        for (o in lo..hi) {
+            val sum = pre[o + span] - pre[o]
+            if (sum > bestSum) { bestSum = sum; bestK = o }
         }
-        val n = (to - from).toDouble()
+        return Window(bestK, bestSum / span, (pre[e.size] - bestSum) / max(1, e.size - span))
+    }
+
+    private fun meanOverRows(a: DoubleArray, w: Int, from: Int, to: Int): DoubleArray {
+        val out = DoubleArray(w)
+        for (y in from until to) for (x in 0 until w) out[x] += a[y * w + x]
+        val n = max(1, to - from).toDouble()
         for (x in 0 until w) out[x] /= n
         return out
+    }
+
+    /** Robust dynamic range (5th..95th percentile, at least 6 luma units). */
+    private fun range(p: DoubleArray): Pair<Double, Double> {
+        val s = p.sortedArray()
+        val lo = s[((s.size - 1) * 0.05).toInt()]
+        val hi = s[((s.size - 1) * 0.95).toInt()]
+        return lo to max(hi - lo, 6.0)
     }
 
     private fun minFilter(p: DoubleArray, r: Int = 2): DoubleArray {
         val n = p.size
         return DoubleArray(n) { i ->
             var m = p[i]
-            for (k in max(0, i - r)..min(n - 1, i + r)) if (p[k] < m) m = p[k]
+            for (j in max(0, i - r)..min(n - 1, i + r)) if (p[j] < m) m = p[j]
             m
         }
     }
 
-    /** How much darker the valley at [pos] is than the cell interiors half a cell to each side. */
-    private fun depth(p: DoubleArray, pm: DoubleArray, pos: Double, half: Double): Double {
+    /** Depth of a NARROW dip at [pos]: lower of the values 0.2 cell to each side minus the local minimum. */
+    private fun depth(p: DoubleArray, pm: DoubleArray, pos: Double, s: Double): Double {
         val n = p.size
-        val a = (pos - half).roundToInt().coerceIn(0, n - 1)
-        val b = (pos + half).roundToInt().coerceIn(0, n - 1)
+        val a = (pos - 0.2 * s).roundToInt().coerceIn(0, n - 1)
+        val b = (pos + 0.2 * s).roundToInt().coerceIn(0, n - 1)
         val c = pos.roundToInt().coerceIn(0, n - 1)
-        return 0.5 * (p[a] + p[b]) - pm[c]
+        return min(p[a], p[b]) - pm[c]
     }
 
-    private fun bestValley(
-        p: DoubleArray, sMin: Double, sMax: Double, sStep: Double, minOff: Int, maxEnd: Double,
-    ): Lattice? {
+    private fun valleyScan(p: DoubleArray, sMin: Double, sMax: Double, sStep: Double, minOff: Int, maxEnd: Double): Scan? {
         val pm = minFilter(p)
-        var best: Lattice? = null
-        var bestScore = -1.0
+        var best: Scan? = null
+        var bestScore = -1e18
+        val depths = DoubleArray(7)
         var s = sMin
         while (s <= sMax + 1e-9) {
-            val half = 0.5 * s
             val hiOff = (maxEnd - 8.0 * s).toInt()
             var off = minOff
             while (off <= hiOff) {
-                var tot = 0.0
                 var cnt = 0
                 for (i in 1..7) {
-                    val dep = depth(p, pm, off + i * s, half)
-                    tot += dep.coerceIn(0.0, 60.0)
-                    if (dep > 5.0) cnt++
+                    val dep = depth(p, pm, off + i * s, s).coerceIn(0.0, 40.0)
+                    depths[i - 1] = dep
+                    if (dep > 4.0) cnt++
                 }
-                var penalty = 0.0
-                for (i in intArrayOf(-1, 9)) penalty += 0.5 * depth(p, pm, off + i * s, half).coerceIn(0.0, 60.0)
-                val score = tot / 7.0 * (cnt / 7.0) - penalty
+                depths.sort()
+                val score = depths[3] * (cnt / 7.0)
                 if (score > bestScore) {
                     bestScore = score
-                    best = Lattice(s, off.toDouble(), score, cnt / 7.0)
+                    best = Scan(s, off.toDouble(), score, cnt / 7.0)
                 }
                 off++
             }
@@ -182,19 +216,18 @@ class BoardLocator(private val downscale: Int = 2) {
         return best
     }
 
-    /** Sub-pixel: centroid of each interior valley, then least-squares position = offset + i * cell. */
+    /** Sub-pixel: centroid of each interior dip, then least squares position = offset + i * cell. */
     private fun refine(p: DoubleArray, cell: Double, offset: Double): Pair<Double, Double> {
         val n = p.size
         val idx = ArrayList<Double>()
         val pos = ArrayList<Double>()
-        val half = 0.5 * cell
         for (i in 1..7) {
             val c = (offset + i * cell).roundToInt()
             val lo = max(0, c - 3)
             val hi = min(n - 1, c + 3)
-            val a = (offset + i * cell - half).roundToInt().coerceIn(0, n - 1)
-            val b = (offset + i * cell + half).roundToInt().coerceIn(0, n - 1)
-            val base = 0.5 * (p[a] + p[b])
+            val a = (offset + i * cell - 0.2 * cell).roundToInt().coerceIn(0, n - 1)
+            val b = (offset + i * cell + 0.2 * cell).roundToInt().coerceIn(0, n - 1)
+            val base = min(p[a], p[b])
             var wSum = 0.0
             var xSum = 0.0
             for (x in lo..hi) {
@@ -207,9 +240,9 @@ class BoardLocator(private val downscale: Int = 2) {
             pos.add(xSum / wSum)
         }
         if (idx.size < 5) return cell to offset
-        val count = idx.size.toDouble()
-        val mx = idx.sum() / count
-        val my = pos.sum() / count
+        val cnt = idx.size.toDouble()
+        val mx = idx.sum() / cnt
+        val my = pos.sum() / cnt
         var sxx = 0.0
         var sxy = 0.0
         for (k in idx.indices) {

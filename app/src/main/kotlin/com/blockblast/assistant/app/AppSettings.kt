@@ -26,6 +26,11 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("diagnostics", false)
         set(v) = p.edit().putBoolean("diagnostics", v).apply()
 
+    /** Empty-cell look learned from boards the user confirmed (6 numbers), or null. Cleared by "Forget learned theme". */
+    var emptyLook: DoubleArray?
+        get() = p.getString("empty_look", null)?.split(",")?.mapNotNull { it.toDoubleOrNull() }?.takeIf { it.size == 6 }?.toDoubleArray()
+        set(v) = p.edit().apply { if (v == null) remove("empty_look") else putString("empty_look", v.joinToString(",")) }.apply()
+
     /** A manual calibration is only valid for the screen size it was made on. */
     fun manualGeometry(screenW: Int, screenH: Int): BoardGeometry? {
         if (p.getInt("cal_w", -1) != screenW || p.getInt("cal_h", -1) != screenH) return null
