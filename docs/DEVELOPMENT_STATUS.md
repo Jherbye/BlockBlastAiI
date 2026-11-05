@@ -22,6 +22,13 @@ Stages D-F implemented as a first functional version (app module, capture, recog
   compiled yet; APK status unknown.**
 - Test logging now prints failure messages in the CI console.
 
+## Real-device feedback log
+- Build 1: "lattice confidence 0.17 too low" on the chocolate theme -> gap-based locator.
+- CI compile failure: stale `CellClassifier.kt` left in the repo (copying a zip over a clone never deletes files; use
+  `rsync -a --delete`). After removing it the app built and ran on the phone (the Fix button is visible in the user's screenshot).
+- Build 2: lavender/magenta theme read the board correctly but lost the tray once pieces covered > 50% of a row
+  ("no pieces found in the tray band") -> multi-background piece reader (see docs/RECOGNITION.md). Not yet re-tested on the phone.
+
 ## Theme-independent recognition (latest work)
 Requirement: the vision must not depend on fixed colours, textures or themes. Implemented: gap-geometry locator (both
 polarities, normalised), empty-look cell reader with multi-cue orientation and learning, background-relative tray reader

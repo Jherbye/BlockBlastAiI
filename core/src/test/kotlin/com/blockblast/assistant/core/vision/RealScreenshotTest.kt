@@ -44,4 +44,20 @@ class RealScreenshotTest {
         assertEquals(listOf(0, 1, 2), result.slots)
         assertTrue("notes=${result.notes} conf=${result.confidence}", result.ok)
     }
+
+    /** Lavender board, all-magenta blocks, beveled tiles (com.block.juggle), 1080x2400, ad banner. */
+    @Test fun lavenderThemeScreenshot() {
+        val frame = load("Screenshot_20261105_103743_com_block_juggle.jpg")
+        assumeTrue("real screenshot not available; skipping", frame != null)
+        val result = RecognitionPipeline().recognize(frame!!)
+        val g = result.geometry!!
+        assertTrue("left ${g.left}", abs(g.left - 64f) <= 10f)
+        assertTrue("top ${g.top}", abs(g.top - 583f) <= 10f)
+        assertTrue("cell ${g.cellSize}", abs(g.cellSize - 119.2f) <= 2.5f)
+        val rows = listOf("........", "##......", "........", "###.....", "###.....", "........", "....###.", "..#.....")
+        assertEquals(rows, com.blockblast.assistant.core.model.Board.ofBits(result.board!!.bits).toRows())
+        assertEquals(listOf(Piece.parse("####"), Piece.parse("#####"), Piece.parse("..#", "###")), result.pieceList)
+        assertEquals(listOf(0, 1, 2), result.slots)
+        assertTrue("notes=${result.notes} conf=${result.confidence}", result.ok)
+    }
 }

@@ -26,12 +26,20 @@ to the detected cell size or to the measured dynamic range of the screen being a
 All of the above. Overlay is hidden during each full scan so it never contaminates the reading.
 
 ## VALIDATED against actual gameplay screenshots
-- **One** real screenshot (chocolate/heart theme, 1080x2400, ad banner, overlay panel on screen): in a Python mirror of
-  the algorithms the geometry (61.9 / 579.8 / cell 119.0), all 64 cells and all three tray pieces are read exactly, and the
-  result is accepted. The same real image is also checked by `RealScreenshotTest` (local only; real screenshots are not
-  committed; set `BLOCKBLAST_REAL_SCREENSHOTS`). The first APK failed on that screenshot ("lattice confidence 0.17"),
-  which led to the gap-based locator.
-- No other real theme has been tested. **Accuracy on other real themes is unknown.**
+Two real screenshots, both from the user's phone (1080x2400, ad banner at the bottom):
+1. Chocolate/heart theme (pink and tan blocks on a dark textured board). Python mirror: geometry 61.9 / 579.8 / cell 119.0,
+   all 64 cells and all three pieces exact. The first APK failed here ("lattice confidence 0.17") because the original
+   locator used brightness edges; this led to the gap-based locator.
+2. Lavender board with all-magenta beveled blocks (com.block.juggle). Python mirror: auto geometry 59.5 / 580.8 / 119.1
+   (about 0.04 cell from the true grid), all 64 cells exact at confidence 1.0, all three pieces exact (1x4, 1x5, L).
+   The APK on the phone read this board fine at first, then reported "Cannot read the screen reliably - no pieces found"
+   once the tray held three long pieces: they covered ~59% of a row, so the per-row MEDIAN background became the piece
+   colour, the real background was flagged as foreground and everything merged into one screen-wide blob that was
+   rejected. Fix: `PieceExtractor` now tries three background models (per-row median, screen-edge colour, single
+   band-wide median) and keeps the most trustworthy result; regression test `extractorHandlesPiecesCoveringMostOfARow`.
+Both screenshots are also encoded in `RealScreenshotTest` (local only: real screenshots are not committed; set
+`BLOCKBLAST_REAL_SCREENSHOTS`). That test has not been run on the Kotlin code. **Two themes is still a tiny sample;
+accuracy on other real themes is unknown.**
 
 ## VALIDATED only on SYNTHETIC themes (not real gameplay)
 `ThemeScenes` generates random themes (light/dark; solid, gradient or noisy backgrounds; visible or no board panel; gap
@@ -43,7 +51,7 @@ piece-shape accuracy, acceptance rate, confidence and confident-wrong rate, and 
 `core/build/reports/theme-robustness.txt` (uploaded by CI).
 
 Prototype (Python, same algorithms) on 240 synthetic scenes, the reference for what to expect:
-- Accepted 94 of 240 (39%); **5 of the 94 accepted scenes contained an error** (cells, a piece set, or geometry),
+- Accepted 106 of 240 (44%); **4 of the 106 accepted scenes contained an error** (cells, a piece set, or geometry),
   i.e. the system is NOT safe to trust blindly on hard themes; the correction UI exists for that reason.
 - Board-cell accuracy given acceptance about 99.8%; geometry succeeded on about 75% of scenes (the rest are flagged).
 - Hard kinds are mostly flagged rather than guessed: low-contrast accepted 17%, same-colour accepted 20% (one same-colour

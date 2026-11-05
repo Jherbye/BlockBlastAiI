@@ -83,6 +83,15 @@ class VisionTest {
         assertEquals(listOf(1), reading.pieces.map { it.slot })
     }
 
+    @Test fun extractorHandlesPiecesCoveringMostOfARow() {
+        // Found on a real screenshot: three long pieces cover > 50% of the row, which broke a per-row median background.
+        val bar4 = com.blockblast.assistant.core.model.Piece.parse("####")
+        val frame = SyntheticFrames.render(spec(sampleBoard, pieces = listOf(bar4, bar4, bar4)))
+        val reading = PieceExtractor().extract(frame, BoardGeometry(60f, 480f, 120f))!!
+        assertEquals(listOf(bar4, bar4, bar4), reading.pieces.map { it.piece })
+        assertTrue("conf ${reading.confidence}", reading.confidence >= 0.5)
+    }
+
     @Test fun extractorReportsNothingWhenTrayIsEmpty() {
         val frame = SyntheticFrames.render(spec(sampleBoard, pieces = emptyList()))
         val reading = PieceExtractor().extract(frame, BoardGeometry(60f, 480f, 120f))!!

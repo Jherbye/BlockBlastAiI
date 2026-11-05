@@ -43,7 +43,29 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
 
     private class Blob(val x0: Int, val y0: Int, val w: Int, val h: Int, val count: Int)
 
+    /**
+     * Tries three background models (per-row median, screen-edge colour, single band-wide median) and keeps the most
+     * trustworthy reading. No single model is right for every tray: a per-row median breaks when pieces cover more than
+     * half of a row (found on a real screenshot), an edge colour breaks when the tray sits on a panel.
+     */
     fun extract(frame: PixelFrame, g: BoardGeometry): PiecesReading? {
+        var best: PiecesReading? = null
+        for (mode in 0..2) {
+            val r = extractWith(frame, g, mode) ?: continue
+            if (best == null || better(r, best)) best = r
+        }
+        return best
+    }
+
+    private fun better(a: PiecesReading, b: PiecesReading): Boolean {
+        val va = a.confidence >= 0.5 && a.pieces.isNotEmpty()
+        val vb = b.confidence >= 0.5 && b.pieces.isNotEmpty()
+        if (va != vb) return va
+        if (a.confidence != b.confidence) return a.confidence > b.confidence
+        return a.pieces.size > b.pieces.size
+    }
+
+    private fun extractWith(frame: PixelFrame, g: BoardGeometry, mode: Int): PiecesReading? {
         val s = g.cellSize.toDouble()
         val top = (g.bottom + 0.25 * s).toInt()
         val bot = min(0.92 * frame.height, g.bottom + 6.5 * s).toInt()
@@ -60,12 +82,8 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
             val p = frame.pixel(min(frame.width - 1, x * step), min(frame.height - 1, top + y * step))
             sr[y][x] = Px.r(p); sg[y][x] = Px.g(p); sb[y][x] = Px.b(p)
         }
-        var dist = distanceMap(sr, sg, sb, gw, gh, false)
-        var thr = threshold(dist, gw, gh)
-        if (fraction(dist, thr) > 0.40) {
-            dist = distanceMap(sr, sg, sb, gw, gh, true)
-            thr = threshold(dist, gw, gh)
-        }
+        val dist = distanceMap(sr, sg, sb, gw, gh, mode)
+        val thr = threshold(dist, gw, gh)
         val loose = Array(gh) { y -> BooleanArray(gw) { x -> dist[y][x] > thr } }
         val looseVals = ArrayList<Double>()
         for (y in 0 until gh) for (x in 0 until gw) if (loose[y][x]) looseVals.add(dist[y][x])
@@ -158,27 +176,32 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
         return out
     }
 
-    private fun distanceMap(sr: Array<IntArray>, sg: Array<IntArray>, sb: Array<IntArray>, gw: Int, gh: Int, edgeBg: Boolean): Array<DoubleArray> {
+    /** mode 0: per-row median colour; 1: median of the screen-edge columns per row; 2: one median colour for the whole band. */
+    private fun distanceMap(sr: Array<IntArray>, sg: Array<IntArray>, sb: Array<IntArray>, gw: Int, gh: Int, mode: Int): Array<DoubleArray> {
         val edgeN = max(1, gw / 25)
-        return Array(gh) { y ->
-            val rv = ArrayList<Int>(); val gv = ArrayList<Int>(); val bv = ArrayList<Int>()
-            if (edgeBg) {
-                for (x in 0 until edgeN) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
-                for (x in gw - edgeN until gw) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
-            } else {
-                for (x in 0 until gw) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
-            }
+        var gr = 0; var gg = 0; var gb = 0
+        if (mode == 2) {
+            val rv = IntArray(gw * gh); val gv = IntArray(gw * gh); val bv = IntArray(gw * gh)
+            var k = 0
+            for (y in 0 until gh) for (x in 0 until gw) { rv[k] = sr[y][x]; gv[k] = sg[y][x]; bv[k] = sb[y][x]; k++ }
             rv.sort(); gv.sort(); bv.sort()
-            val mr = rv[rv.size / 2]; val mg = gv[gv.size / 2]; val mb = bv[bv.size / 2]
+            gr = rv[rv.size / 2]; gg = gv[gv.size / 2]; gb = bv[bv.size / 2]
+        }
+        return Array(gh) { y ->
+            var mr = gr; var mg = gg; var mb = gb
+            if (mode != 2) {
+                val rv = ArrayList<Int>(); val gv = ArrayList<Int>(); val bv = ArrayList<Int>()
+                if (mode == 1) {
+                    for (x in 0 until edgeN) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
+                    for (x in gw - edgeN until gw) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
+                } else {
+                    for (x in 0 until gw) { rv.add(sr[y][x]); gv.add(sg[y][x]); bv.add(sb[y][x]) }
+                }
+                rv.sort(); gv.sort(); bv.sort()
+                mr = rv[rv.size / 2]; mg = gv[gv.size / 2]; mb = bv[bv.size / 2]
+            }
             DoubleArray(gw) { x -> (abs(sr[y][x] - mr) + abs(sg[y][x] - mg) + abs(sb[y][x] - mb)).toDouble() }
         }
-    }
-
-    private fun fraction(dist: Array<DoubleArray>, thr: Double): Double {
-        var c = 0
-        var t = 0
-        for (row in dist) for (v in row) { t++; if (v > thr) c++ }
-        return c.toDouble() / max(1, t)
     }
 
     private fun threshold(dist: Array<DoubleArray>, gw: Int, gh: Int): Double {
