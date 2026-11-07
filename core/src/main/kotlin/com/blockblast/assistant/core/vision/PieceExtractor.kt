@@ -14,6 +14,7 @@ data class DetectedPiece(
     val confidence: Double,
     /** Mean colour of the piece (palette cue for the cell reader). */
     val rgb: DoubleArray,
+    val grab: PieceGrab,
 )
 
 data class PiecesReading(
@@ -23,7 +24,10 @@ data class PiecesReading(
     val notes: List<String>,
     /** Slots that look empty but contain weak foreground energy: a piece may have been missed. */
     val suspectSlots: List<Int>,
-)
+) {
+    /** Slots whose piece is doubtful (low own confidence) or that may hide a missed piece. */
+    val uncertainSlots: List<Int> get() = (pieces.filter { it.confidence < 0.5 }.map { it.slot } + suspectSlots).distinct()
+}
 
 /**
  * Theme-independent tray reading from SHAPE, not colour.
@@ -149,8 +153,25 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
             val rgb = if (cnt > 0) doubleArrayOf(rs / cnt, gs / cnt, bs / cnt) else doubleArrayOf(0.0, 0.0, 0.0)
             val centerX = (b.x0 + b.w / 2.0).toFloat()
             val slot = min(2, (centerX / (frame.width / 3.0)).toInt())
-            minConf = min(minConf, margin)
-            detected.add(DetectedPiece(slot, Piece(cells), centerX, margin, rgb))
+            var pieceConf = min(margin, fitConf)
+            if (!isConnected(cells)) {
+                pieceConf = min(pieceConf, 0.3) // a real piece is one connected shape
+                notes.add("piece in slot ${slot + 1} is not one connected shape")
+            }
+            minConf = min(minConf, pieceConf)
+            // grab = filled cell nearest the blob centre, as screen pixels and as an index in the normalized piece
+            val minI = cells.minOf { it.x }
+            val minJ = cells.minOf { it.y }
+            var gc = cells[0]
+            var gd = Double.MAX_VALUE
+            for (c0 in cells) {
+                val qx = b.x0 + (c0.x + 0.5) * cw
+                val qy = b.y0 + (c0.y + 0.5) * ch
+                val dd = (qx - (b.x0 + b.w / 2.0)) * (qx - (b.x0 + b.w / 2.0)) + (qy - (b.y0 + b.h / 2.0)) * (qy - (b.y0 + b.h / 2.0))
+                if (dd < gd) { gd = dd; gc = c0 }
+            }
+            val grab = PieceGrab(gc.x - minI, gc.y - minJ, (b.x0 + (gc.x + 0.5) * cw).toFloat(), (b.y0 + (gc.y + 0.5) * ch).toFloat())
+            detected.add(DetectedPiece(slot, Piece(cells), centerX, pieceConf, rgb, grab))
         }
         detected.sortBy { it.centerX }
         val suspect = suspects(dist, thr, gw, gh, detected.map { it.slot }.toSet())
@@ -160,6 +181,21 @@ class PieceExtractor(private val expectedTrayScale: Double = 0.5) {
             notes.add("slot(s) ${suspect.joinToString()} look empty but contain faint shapes: a piece may be missed")
         }
         return PiecesReading(detected, c, conf, notes, suspect)
+    }
+
+    private fun isConnected(cells: List<Cell>): Boolean {
+        val set = cells.map { it.x to it.y }.toHashSet()
+        val seen = HashSet<Pair<Int, Int>>()
+        val stack = ArrayList<Pair<Int, Int>>()
+        val start = set.first()
+        seen.add(start); stack.add(start)
+        while (stack.isNotEmpty()) {
+            val (x, y) = stack.removeAt(stack.size - 1)
+            for (nb in listOf(x + 1 to y, x - 1 to y, x to y + 1, x to y - 1)) {
+                if (nb in set && seen.add(nb)) stack.add(nb)
+            }
+        }
+        return seen.size == set.size
     }
 
     private fun suspects(dist: Array<DoubleArray>, thr: Double, gw: Int, gh: Int, taken: Set<Int>): List<Int> {

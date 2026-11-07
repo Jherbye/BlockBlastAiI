@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Block Blast Assistant</string>
+    <string name="autoplay_service_label">Block Blast Assistant autoplay input</string>
+    <string name="autoplay_service_description">Optional. Lets the assistant perform drag gestures ONLY while you have started Autoplay mode, to place Block Blast pieces for you. Assist mode never uses it. Turn this service off at any time to disable Autoplay.</string>
+</resources>

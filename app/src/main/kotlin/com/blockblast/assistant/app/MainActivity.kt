@@ -54,6 +54,11 @@ class MainActivity : Activity() {
         overlayStatus = text("")
         runStatus = text("")
         root.addView(overlayStatus)
+        root.addView(text("Modes: ASSIST (default) only shows suggestions and never touches the game. AUTOPLAY is optional: it needs the accessibility input service below, you must start it yourself, it verifies every move and stops when recognition is doubtful, and E-STOP ends it instantly. Using automation may be against the game's terms.", 12f))
+        root.addView(Button(this).apply {
+            text = "Enable Autoplay input (optional): opens Accessibility settings"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        })
         root.addView(Button(this).apply {
             text = "1. Grant overlay permission"
             setOnClickListener {
@@ -137,7 +142,8 @@ class MainActivity : Activity() {
     }
 
     private fun render(s: Snapshot) {
-        overlayStatus.text = "Overlay permission: " + if (Settings.canDrawOverlays(this)) "granted" else "NOT granted"
+        overlayStatus.text = "Overlay permission: " + (if (Settings.canDrawOverlays(this)) "granted" else "NOT granted") +
+            "\nAutoplay input service: " + (if (AutoplayAccessibilityService.isEnabled) "enabled" else "not enabled (Assist mode works without it)")
         runStatus.text = (if (s.running) "Running: " else "Not running: ") + s.status
         if (!settings.showDiagnostics) {
             diagnostics.text = ""

@@ -27,23 +27,26 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Floating overlay. VISUAL ONLY: the highlight window is NOT_TOUCHABLE and never forwards or injects input;
- * the small control panel only receives touches meant for its own buttons.
- * All methods must be called on the main thread.
+ * Floating overlay. The control panel is created ONCE and kept until the assistant stops: it is never recreated, never
+ * hidden by a scan (unless the user dragged it over the board/tray), and only re-rendered when [PanelState] changes.
+ * The highlight window is NOT_TOUCHABLE and never forwards input. All methods must be called on the main thread.
  */
 class OverlayController(context: Context, private val callbacks: Callbacks) {
 
     interface Callbacks {
         fun onPrev()
         fun onNext()
-        fun onRecalc()
-        fun onTogglePause(): Boolean
+        fun onScan()
+        fun onUndo()
+        fun onToggleMode()
+        fun onRunButton()
         fun onToggleHighlights(): Boolean
         fun onCalibrate()
         fun onAutoCalibrate()
-        fun onStop()
-        fun onCalibrationDone(geometry: BoardGeometry)
         fun onFix()
+        fun onEmergencyStop()
+        fun onQuit()
+        fun onCalibrationDone(geometry: BoardGeometry)
         fun onCorrectionDone(bits: Long, slotPieces: List<Piece?>)
         fun onCorrectionCancelled()
     }
@@ -54,14 +57,21 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
 
     private val highlight = HighlightView(ctx)
     private val panel = LinearLayout(ctx)
-    private val statusView = TextView(ctx)
-    private val detailView = TextView(ctx)
-    private val controls = LinearLayout(ctx)
+    private val dotView = TextView(ctx)
+    private val titleView = TextView(ctx)
+    private val modeChip = TextView(ctx)
+    private val collapseBtn = Button(ctx)
+    private val levelView = TextView(ctx)
+    private val statsView = TextView(ctx)
+    private val messageView = TextView(ctx)
+    private val body = LinearLayout(ctx)
+    private val buttons = HashMap<String, Button>()
     private lateinit var panelParams: WindowManager.LayoutParams
     private var highlightParams: WindowManager.LayoutParams? = null
     private var calibration: CalibrationView? = null
     private var correction: CorrectionView? = null
     private var added = false
+    private var last: PanelState? = null
 
     private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
 
@@ -94,16 +104,16 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
 
         buildPanel()
         panelParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            dp(300), WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             baseFlags(true) or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(8)
-            y = dp(48)
+            x = if (PanelMemory.x == Int.MIN_VALUE) dp(8) else PanelMemory.x
+            y = if (PanelMemory.y == Int.MIN_VALUE) dp(48) else PanelMemory.y
         }
         wm.addView(panel, panelParams)
         added = true
+        applyCollapsed(PanelMemory.collapsed)
     }
 
     fun destroy() {
@@ -116,7 +126,6 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         }
     }
 
-    /** Called after rotation / display size change. */
     fun onScreenChanged() {
         val hp = highlightParams ?: return
         val (w, h) = screenSize()
@@ -126,11 +135,25 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         highlight.invalidate()
     }
 
-    /** Hide both windows so a screen capture sees the unmodified game. */
-    fun setCaptureHidden(hidden: Boolean) {
-        val v = if (hidden) View.INVISIBLE else View.VISIBLE
-        highlight.visibility = v
-        panel.visibility = v
+    /**
+     * Hide our drawing so a capture sees the unmodified game. The highlight window always hides (it is invisible when
+     * there is nothing to highlight anyway). The control panel stays visible unless it overlaps [gameRegion].
+     */
+    fun setCaptureHidden(hidden: Boolean, gameRegion: FloatRect?) {
+        highlight.visibility = if (hidden) View.INVISIBLE else View.VISIBLE
+        val hidePanel = hidden && gameRegion != null && panelRect()?.let { intersects(it, gameRegion) } == true
+        panel.visibility = if (hidePanel) View.INVISIBLE else View.VISIBLE
+    }
+
+    fun panelOverlaps(region: FloatRect): Boolean = panelRect()?.let { intersects(it, region) } == true
+
+    private fun intersects(a: FloatRect, b: FloatRect) = a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+
+    private fun panelRect(): FloatRect? {
+        if (!added || panel.width <= 0) return null
+        val loc = IntArray(2)
+        panel.getLocationOnScreen(loc)
+        return FloatRect(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + panel.width).toFloat(), (loc[1] + panel.height).toFloat())
     }
 
     fun setHighlightsEnabled(enabled: Boolean) {
@@ -139,152 +162,169 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     }
 
     fun showRecommendation(rec: Recommendation, geometry: BoardGeometry, opacityPercent: Int, showSequence: Boolean) {
+        val alpha = (opacityPercent.coerceIn(10, 95) * 255) / 100
+        if (highlight.recommendation == rec && highlight.geometry == geometry && highlight.alphaValue == alpha && highlight.showSequence == showSequence) return
         highlight.geometry = geometry
         highlight.recommendation = rec
-        highlight.alphaValue = (opacityPercent.coerceIn(10, 95) * 255) / 100
+        highlight.alphaValue = alpha
         highlight.showSequence = showSequence
         highlight.invalidate()
     }
 
     fun clearHighlights() {
+        if (highlight.recommendation == null) return
         highlight.recommendation = null
         highlight.invalidate()
-    }
-
-    fun setStatus(status: String, detail: String) {
-        statusView.text = status
-        detailView.text = detail
-    }
-
-    /** Highlights the Fix button when recognition is uncertain and the user's correction is needed. */
-    fun setFixNeeded(needed: Boolean) {
-        controls.findViewWithTag<Button>("fix")?.text = if (needed) "FIX!" else "Fix"
-    }
-
-    fun startCorrection(geometry: BoardGeometry, bits: Long, slotPieces: List<Piece?>) {
-        if (correction != null) return
-        val (w, h) = screenSize()
-        val view = CorrectionView(ctx, geometry, bits, slotPieces, { b, p -> stopCorrection(); callbacks.onCorrectionDone(b, p) }, { stopCorrection(); callbacks.onCorrectionCancelled() })
-        val lp = WindowManager.LayoutParams(
-            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-        wm.addView(view, lp)
-        correction = view
-    }
-
-    private fun stopCorrection() {
-        correction?.let { runCatching { wm.removeView(it) } }
-        correction = null
-    }
-
-    fun setPausedLabel(paused: Boolean) {
-        (controls.findViewWithTag<Button>("pause"))?.text = if (paused) "Resume" else "Pause"
     }
 
     /** Screen-pixel rectangles currently covered by our own drawing (highlight cells and the control panel). */
     fun excludedRects(): List<FloatRect> {
         val out = ArrayList<FloatRect>()
         out.addAll(highlight.coveredRects())
-        if (added && panel.width > 0) {
-            val loc = IntArray(2)
-            panel.getLocationOnScreen(loc)
-            out.add(FloatRect(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + panel.width).toFloat(), (loc[1] + panel.height).toFloat()))
-        }
+        panelRect()?.let { out.add(it) }
         return out
     }
 
-    // ---- control panel ---------------------------------------------------------------------------------------------
+    // ---- panel ------------------------------------------------------------------------------------------------------
 
-    private fun smallButton(label: String, tag: String? = null, onClick: (Button) -> Unit): Button =
+    private fun levelColor(l: Level) = when (l) {
+        Level.GOOD -> Color.rgb(76, 175, 80)
+        Level.UNCERTAIN -> Color.rgb(255, 193, 7)
+        Level.NEEDS_CORRECTION -> Color.rgb(244, 67, 54)
+        Level.SEARCHING -> Color.rgb(144, 164, 174)
+    }
+
+    private fun setIfChanged(tv: TextView, text: String) {
+        if (tv.text.toString() != text) tv.text = text
+    }
+
+    /** Re-renders only what changed. Safe to call as often as you like. */
+    fun render(s: PanelState) {
+        if (s == last) return
+        last = s
+        dotView.setTextColor(levelColor(s.level))
+        setIfChanged(
+            levelView,
+            "Recognition: " + when (s.level) {
+                Level.GOOD -> "Good"
+                Level.UNCERTAIN -> "Uncertain"
+                Level.NEEDS_CORRECTION -> "Needs correction"
+                Level.SEARCHING -> "Searching..."
+            },
+        )
+        levelView.setTextColor(levelColor(s.level))
+        setIfChanged(
+            statsView,
+            "Grid " + (s.gridConfidence?.let { "%.2f".format(it) } ?: "-") + "  Board " +
+                (s.boardConfidence?.let { "%.2f".format(it) } ?: "-") + "  Pieces " + s.piecesText +
+                (if (s.progress.isEmpty()) "" else "\n" + s.progress),
+        )
+        setIfChanged(messageView, s.message)
+        messageView.setTextColor(
+            when (s.severity) {
+                Severity.INFO -> Color.rgb(207, 216, 220)
+                Severity.WARNING -> Color.rgb(255, 213, 79)
+                Severity.ERROR -> Color.rgb(255, 138, 128)
+            },
+        )
+        setIfChanged(modeChip, if (s.mode == Mode.AUTOPLAY) "AUTOPLAY" else "ASSIST")
+        modeChip.setBackgroundColor(if (s.mode == Mode.AUTOPLAY) Color.rgb(198, 40, 40) else Color.rgb(57, 73, 171))
+        buttons["mode"]?.let { setIfChanged(it, if (s.mode == Mode.AUTOPLAY) "Autoplay" else "Assist") }
+        buttons["run"]?.let {
+            setIfChanged(
+                it,
+                if (s.mode == Mode.ASSIST) (if (s.assistPaused) "Resume" else "Pause")
+                else when (s.run) { RunState.RUNNING -> "Pause"; RunState.PAUSED, RunState.NEEDS_ATTENTION -> "Resume"; RunState.STOPPED -> "Start" },
+            )
+        }
+        buttons["hide"]?.let { setIfChanged(it, if (s.highlightsOn) "Hide" else "Show") }
+        buttons["fix"]?.let { setIfChanged(it, if (s.level == Level.NEEDS_CORRECTION || s.level == Level.UNCERTAIN) "FIX!" else "Fix") }
+    }
+
+    private fun button(label: String, tag: String, color: Int? = null, onClick: () -> Unit): Button =
         Button(ctx).apply {
             text = label
-            textSize = 11f
+            textSize = 13f
             isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            if (tag != null) this.tag = tag
-            setOnClickListener { onClick(this) }
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+            if (color != null) setBackgroundColor(color)
+            setOnClickListener { onClick() }
+            buttons[tag] = this
         }
+
+    private fun row(vararg b: Button): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        for (x in b) addView(x, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) })
+    }
 
     private fun buildPanel() {
         panel.orientation = LinearLayout.VERTICAL
-        panel.setPadding(dp(8), dp(6), dp(8), dp(6))
-        panel.background = GradientDrawable().apply {
-            setColor(Color.argb(215, 18, 24, 48))
-            cornerRadius = dp(10).toFloat()
+        panel.setPadding(dp(10), dp(8), dp(10), dp(8))
+        panel.background = GradientDrawable().apply { setColor(Color.argb(230, 18, 24, 48)); cornerRadius = dp(12).toFloat() }
+
+        dotView.text = "\u25CF"; dotView.textSize = 16f
+        titleView.text = "Block Blast Assistant"; titleView.setTextColor(Color.WHITE); titleView.textSize = 14f
+        titleView.setTypeface(titleView.typeface, android.graphics.Typeface.BOLD)
+        modeChip.setTextColor(Color.WHITE); modeChip.textSize = 11f; modeChip.setPadding(dp(6), dp(2), dp(6), dp(2))
+        collapseBtn.text = "\u2013"; collapseBtn.textSize = 16f; collapseBtn.minWidth = 0; collapseBtn.minimumWidth = 0
+        collapseBtn.minHeight = 0; collapseBtn.minimumHeight = 0; collapseBtn.setPadding(0, 0, 0, 0)
+        collapseBtn.setOnClickListener { applyCollapsed(!PanelMemory.collapsed) }
+        val header = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(dotView, LinearLayout.LayoutParams(dp(22), LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(titleView, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(modeChip)
+            addView(collapseBtn, LinearLayout.LayoutParams(dp(36), dp(32)).apply { leftMargin = dp(6) })
         }
-        statusView.setTextColor(Color.WHITE)
-        statusView.textSize = 13f
-        statusView.text = "Starting…"
-        detailView.setTextColor(Color.rgb(200, 210, 235))
-        detailView.textSize = 11f
-        detailView.maxWidth = dp(260)
-        panel.addView(statusView)
-        panel.addView(detailView)
+        panel.addView(header)
+        levelView.textSize = 13f; levelView.setTypeface(levelView.typeface, android.graphics.Typeface.BOLD)
+        statsView.setTextColor(Color.rgb(176, 190, 197)); statsView.textSize = 12f
+        messageView.textSize = 12f; messageView.minLines = 2; messageView.maxLines = 4
+        panel.addView(levelView); panel.addView(statsView)
 
-        val row1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        row1.addView(smallButton("Prev") { callbacks.onPrev() })
-        row1.addView(smallButton("Next") { callbacks.onNext() })
-        row1.addView(smallButton("Redo") { callbacks.onRecalc() })
-        row1.addView(smallButton("Pause", "pause") { b -> b.text = if (callbacks.onTogglePause()) "Resume" else "Pause" })
-        val row2 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        row2.addView(smallButton("Hide") { b -> b.text = if (callbacks.onToggleHighlights()) "Hide" else "Show" })
-        row2.addView(smallButton("Cal") { callbacks.onCalibrate() })
-        row2.addView(smallButton("Auto") { callbacks.onAutoCalibrate() })
-        row2.addView(smallButton("Fix", "fix") { callbacks.onFix() })
-        row2.addView(smallButton("Stop") { callbacks.onStop() })
-        controls.orientation = LinearLayout.VERTICAL
-        controls.addView(row1)
-        controls.addView(row2)
-        panel.addView(controls)
+        body.orientation = LinearLayout.VERTICAL
+        body.addView(messageView)
+        body.addView(row(button("Assist", "mode") { callbacks.onToggleMode() }, button("Pause", "run") { callbacks.onRunButton() },
+            button("Prev", "prev") { callbacks.onPrev() }, button("Next", "next") { callbacks.onNext() }))
+        body.addView(row(button("Undo", "undo") { callbacks.onUndo() }, button("Hide", "hide") { callbacks.onToggleHighlights() },
+            button("Cal", "cal") { callbacks.onCalibrate() }, button("Auto", "auto") { callbacks.onAutoCalibrate() }))
+        body.addView(row(button("Fix", "fix") { callbacks.onFix() }, button("Scan", "scan") { callbacks.onScan() },
+            button("E-STOP", "estop", Color.rgb(183, 28, 28)) { callbacks.onEmergencyStop() }, button("Quit", "quit") { callbacks.onQuit() }))
+        panel.addView(body)
 
-        // Drag by the status line; tap it to collapse or expand.
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
-        var moved = false
-        statusView.setOnTouchListener { _, e ->
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
+        val drag = View.OnTouchListener { _, e ->
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY; startX = panelParams.x; startY = panelParams.y; moved = false
-                }
+                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; startX = panelParams.x; startY = panelParams.y }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - downX
-                    val dy = e.rawY - downY
-                    if (kotlin.math.abs(dx) > dp(4) || kotlin.math.abs(dy) > dp(4)) moved = true
-                    if (moved) {
-                        panelParams.x = startX + dx.toInt()
-                        panelParams.y = startY + dy.toInt()
-                        wm.updateViewLayout(panel, panelParams)
-                    }
-                }
-                MotionEvent.ACTION_UP -> if (!moved) {
-                    val collapsed = controls.visibility == View.VISIBLE
-                    controls.visibility = if (collapsed) View.GONE else View.VISIBLE
-                    detailView.visibility = if (collapsed) View.GONE else View.VISIBLE
+                    panelParams.x = startX + (e.rawX - downX).toInt()
+                    panelParams.y = startY + (e.rawY - downY).toInt()
+                    PanelMemory.x = panelParams.x; PanelMemory.y = panelParams.y
+                    wm.updateViewLayout(panel, panelParams)
                 }
             }
             true
         }
+        header.setOnTouchListener(drag)
+        render(PanelState())
     }
 
-    // ---- manual calibration ----------------------------------------------------------------------------------------
+    private fun applyCollapsed(collapsed: Boolean) {
+        PanelMemory.collapsed = collapsed
+        body.visibility = if (collapsed) View.GONE else View.VISIBLE
+        statsView.visibility = if (collapsed) View.GONE else View.VISIBLE
+        collapseBtn.text = if (collapsed) "+" else "\u2013"
+    }
+
+    // ---- manual calibration and correction -----------------------------------------------------------------------
 
     fun startCalibration(initial: BoardGeometry?) {
         if (calibration != null) return
         val (w, h) = screenSize()
         val start = initial ?: BoardGeometry(w * 0.05f, h * 0.22f, w * 0.9f / 8f)
-        val view = CalibrationView(ctx, start) { g ->
-            stopCalibration()
-            callbacks.onCalibrationDone(g)
-        }
+        val view = CalibrationView(ctx, start) { g -> stopCalibration(); callbacks.onCalibrationDone(g) }
         val lp = WindowManager.LayoutParams(
             w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
         ).apply {
@@ -298,6 +338,26 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
     private fun stopCalibration() {
         calibration?.let { runCatching { wm.removeView(it) } }
         calibration = null
+    }
+
+    fun startCorrection(geometry: BoardGeometry, bits: Long, slotPieces: List<Piece?>, uncertainSlots: List<Int>) {
+        if (correction != null) return
+        val (w, h) = screenSize()
+        val view = CorrectionView(ctx, geometry, bits, slotPieces, uncertainSlots,
+            { b, p -> stopCorrection(); callbacks.onCorrectionDone(b, p) }, { stopCorrection(); callbacks.onCorrectionCancelled() })
+        val lp = WindowManager.LayoutParams(
+            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, baseFlags(true), PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        wm.addView(view, lp)
+        correction = view
+    }
+
+    private fun stopCorrection() {
+        correction?.let { runCatching { wm.removeView(it) } }
+        correction = null
     }
 
     // ---- views -----------------------------------------------------------------------------------------------------
@@ -444,6 +504,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
         private val geometry: BoardGeometry,
         bits: Long,
         slotPieces: List<Piece?>,
+        private val uncertainSlots: List<Int>,
         private val onDone: (Long, List<Piece?>) -> Unit,
         private val onCancel: () -> Unit,
     ) : FrameLayout(context) {
@@ -503,7 +564,7 @@ class OverlayController(context: Context, private val callbacks: Callbacks) {
                     fillPaint.color = if (grids[slot][i]) Color.argb(200, 255, 190, 60) else Color.argb(60, 255, 255, 255)
                     canvas.drawRoundRect(rect, 4f, 4f, fillPaint)
                 }
-                canvas.drawText("piece ${slot + 1}", ox, oy - 8f, textPaint)
+                canvas.drawText(if (slot in uncertainSlots) "piece ${slot + 1} - CHECK THIS ONE" else "piece ${slot + 1}", ox, oy - 8f, textPaint)
             }
             canvas.restore()
         }

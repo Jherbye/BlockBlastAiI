@@ -25,8 +25,31 @@ to the detected cell size or to the measured dynamic range of the screen being a
 ## IMPLEMENTED (code exists)
 All of the above. Overlay is hidden during each full scan so it never contaminates the reading.
 
+## Confidence: what each number means (and how it was checked)
+`RecognitionResult` reports the stages separately so the UI can say WHICH stage is doubtful:
+- **grid** (`locateConfidence`): dip strength, fraction of grid lines that are real dips, inside/outside energy contrast.
+- **board** (`board.confidence`): second-lowest per-cell confidence (one doubtful cell is tolerated by the maths, two are not),
+  capped at 0.3 if the reading contains a complete row/column (impossible: lines clear at once). Per-cell confidence is the
+  margin from the decision line, scaled by how clear the empty/occupied break is. `weakCells` lists the doubtful cells.
+- **pieces**: each piece has its own confidence (cell-sampling margin, tray-cell-size fit, connectedness); `uncertainSlots` names
+  the doubtful pieces and slots that look empty but hold faint shapes. A good board with one doubtful piece is reported as
+  "board good; piece N uncertain" - not as an unreadable screen.
+Acceptance: grid >= 0.5, board >= 0.9, pieces >= 0.5, at least one piece.
+
+**Why a screenshot scored 0.49 although everything was read correctly** (dark board, lavender and tan blocks): about ten EMPTY
+cells (slightly textured) sat just under the empty/occupied decision line, which was placed relative to the empty look instead
+of in the natural gap between the groups. Fix: the line is now the first significant break above the empty cluster. A first
+attempt used the BIGGEST gap and was wrong on boards with several block colours (it put one block colour with the empties:
+13 confident errors on a fresh set of 100 synthetic scenes); that was caught by testing on seeds not used for tuning.
+
+**Calibration measured on synthetic themes the code was not tuned on** (Python mirror of the same algorithms; the Kotlin
+`ThemeRobustnessTest` prints the same table in CI): on 240+ fresh scenes about half are accepted, and about 2% of ACCEPTED
+scenes still contain an error (roughly 4-5 of 205). Among readings with board confidence >= 0.9, about 95% of boards were read
+exactly. Hard kinds (blocks nearly the colour of empty cells) are mostly flagged rather than guessed. Confidence is therefore
+informative but NOT a guarantee; that is what Fix and Autoplay's move verification are for.
+
 ## VALIDATED against actual gameplay screenshots
-Two real screenshots, both from the user's phone (1080x2400, ad banner at the bottom):
+Three real screenshots, all from the user's phone (1080x2400, ad banner at the bottom):
 1. Chocolate/heart theme (pink and tan blocks on a dark textured board). Python mirror: geometry 61.9 / 579.8 / cell 119.0,
    all 64 cells and all three pieces exact. The first APK failed here ("lattice confidence 0.17") because the original
    locator used brightness edges; this led to the gap-based locator.
@@ -37,8 +60,11 @@ Two real screenshots, both from the user's phone (1080x2400, ad banner at the bo
    colour, the real background was flagged as foreground and everything merged into one screen-wide blob that was
    rejected. Fix: `PieceExtractor` now tries three background models (per-row median, screen-edge colour, single
    band-wide median) and keeps the most trustworthy result; regression test `extractorHandlesPiecesCoveringMostOfARow`.
-Both screenshots are also encoded in `RealScreenshotTest` (local only: real screenshots are not committed; set
-`BLOCKBLAST_REAL_SCREENSHOTS`). That test has not been run on the Kotlin code. **Two themes is still a tiny sample;
+3. Dark board with lavender and tan beveled blocks, other apps' chat-head overlays visible. Python mirror: grid 61.1 / 579.5 / cell
+   119.3, all 64 cells exact, all three pieces exact (two vertical 4-bars and a 2x3 block). The APK scored the board 0.49 here
+   (see above); after the fix the mirror gives board confidence 1.0 on all three screenshots.
+All three screenshots are also encoded in `RealScreenshotTest` (local only: real screenshots are not committed; set
+`BLOCKBLAST_REAL_SCREENSHOTS`). That test has not been run on the Kotlin code. **Three themes is still a tiny sample;
 accuracy on other real themes is unknown.**
 
 ## VALIDATED only on SYNTHETIC themes (not real gameplay)

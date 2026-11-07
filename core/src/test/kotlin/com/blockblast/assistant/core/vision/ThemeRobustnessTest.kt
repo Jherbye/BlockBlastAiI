@@ -21,6 +21,9 @@ class ThemeRobustnessTest {
         var confSum = 0.0; var wrongAccepted = 0; var acceptedCells = 0; var acceptedCellErr = 0
     }
 
+    /** (board confidence, board read exactly right) for every scene: the calibration table. */
+    private val reliability = ArrayList<Pair<Double, Boolean>>()
+
     private fun shapeOf(p: Piece) = p.cells.map { it.x to it.y }
 
     @Test fun measureAcrossThemes() {
@@ -47,6 +50,7 @@ class ThemeRobustnessTest {
                 t.cells += 64; t.cellErr += wrong
                 if (piecesOk) t.pieceOk++
                 t.confSum += result.confidence
+                reliability.add((result.board?.confidence ?: 0.0) to (bits != null && wrong == 0))
                 if (result.ok) {
                     t.accepted++
                     t.acceptedCells += 64; t.acceptedCellErr += wrong
@@ -66,6 +70,11 @@ class ThemeRobustnessTest {
             accepted += t.accepted; wrongAccepted += t.wrongAccepted; all += t.n; acCells += t.acceptedCells; acErr += t.acceptedCellErr
         }
         report.append("overall: scenes=$all accepted=$accepted acceptedButWrong=$wrongAccepted\n")
+        report.append("Calibration: board confidence bin -> fraction of boards read exactly\n")
+        for ((lo, hi) in listOf(0.0 to 0.25, 0.25 to 0.5, 0.5 to 0.75, 0.75 to 0.9, 0.9 to 1.01)) {
+            val sel = reliability.filter { it.first >= lo && it.first < hi }
+            if (sel.isNotEmpty()) report.append("  [%.2f,%.2f) n=%3d exactlyRight=%.2f\n".format(lo, minOf(hi, 1.0), sel.size, sel.count { it.second }.toDouble() / sel.size))
+        }
         println(report)
         File("build/reports").mkdirs()
         File("build/reports/theme-robustness.txt").writeText(report.toString())

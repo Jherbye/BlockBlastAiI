@@ -15,7 +15,10 @@ data class BoardReading(
     /** Second-lowest cell confidence: one doubtful cell may be tolerated by the UI, two may not. */
     val confidence: Double,
     val notes: List<String>,
-)
+) {
+    /** Cells (index y * 8 + x) whose own confidence is below the board acceptance level. */
+    val weakCells: List<Int> get() = cellConfidence.indices.filter { cellConfidence[it] < 0.9 }
+}
 
 /**
  * Theme-independent occupancy reading. No colour, texture or background is hard-coded.
@@ -163,13 +166,38 @@ class CellReader {
         var inCnt = 0
         for (i in 0 until n) if (members[i]) { inSum += dist[i]; inCnt++ }
         val sig = max(RAD * 0.5, if (inCnt > 0) inSum / inCnt else 0.0)
-        val threshold = max(2.6, 3.0 * sig)
+        // Decision line: the FIRST significant break above the empty cluster (not the biggest overall: with several block
+        // colours the biggest gap can lie between two block colours, which would lump one colour in with "empty").
+        // A break must start at/above the empty cluster's extent and end at a distance a block could plausibly have (>= 2.6).
+        val sortedDist = dist.sortedArray()
+        var memberMax = 0.0
+        for (i in 0 until n) if (members[i] && dist[i] > memberMax) memberMax = dist[i]
+        val breaks = ArrayList<Pair<Double, Int>>()
+        for (k in 0 until n - 1) {
+            val lo = sortedDist[k]
+            val hi = sortedDist[k + 1]
+            if (lo >= memberMax - 1e-9 && hi >= 2.6 && hi - lo >= 1.2) breaks.add((hi - lo) to k)
+        }
+        val threshold: Double
+        val half: Double
+        val strength: Double
+        if (breaks.isNotEmpty()) {
+            val biggest = breaks.maxOf { it.first }
+            val pick = breaks.first { it.first >= 0.6 * biggest }
+            threshold = (sortedDist[pick.second] + sortedDist[pick.second + 1]) / 2.0
+            half = pick.first / 2.0
+            strength = min(1.0, pick.first / 3.0)
+        } else {
+            threshold = max(2.6, 3.0 * sig)
+            half = 0.5 * threshold
+            strength = 1.0
+        }
         val occupied = BooleanArray(n) { dist[it] > threshold }
         val notes = ArrayList<String>()
         val conf = DoubleArray(n)
         if (occupied.any { it }) {
             val o = orient ?: 0.8
-            for (i in 0 until n) conf[i] = (abs(dist[i] - threshold) / (0.5 * threshold)).coerceIn(0.0, 1.0) * min(1.0, 0.4 + o)
+            for (i in 0 until n) conf[i] = (abs(dist[i] - threshold) / half).coerceIn(0.0, 1.0) * strength * min(1.0, 0.4 + o)
             if (occupied.count { it } > 0.8 * n) {
                 for (i in 0 until n) conf[i] *= 0.3
                 notes.add("most cells differ from the chosen empty look")
@@ -178,7 +206,10 @@ class CellReader {
         } else {
             val sc = scored[chosen]
             val looksEmpty = sc.gapPart > -0.45 && (sc.palPart == null || sc.palPart > 0.25)
-            var c = if (looksEmpty) 0.8 else 0.15
+            // An empty board at game start: every cell looks alike. Accept it with high confidence only when the cues agree
+            // (cells close to the grid-gap colour AND far from the tray pieces' colours); otherwise stay below acceptance.
+            val strongPalette = sc.palPart != null && sc.palPart > 0.5
+            var c = if (looksEmpty) (if (strongPalette) 0.92 else 0.8) else 0.15
             if (emptyLook != null && looksEmpty) c = (1.0 - cellDistance(center, emptyLook) / 4.0).coerceIn(0.0, 1.0)
             for (i in 0 until n) conf[i] = c
             notes.add(if (looksEmpty) "uniform board read as empty" else "ambiguous: every cell looks the same")
@@ -186,7 +217,18 @@ class CellReader {
         var bits = 0L
         for (i in 0 until n) if (occupied[i]) bits = bits or (1L shl i)
         val sorted = conf.sortedArray()
-        return BoardReading(bits, conf, sorted[1], notes)
+        var boardConf = sorted[1]
+        // Structural check from the rules: a completed row or column clears immediately, so it cannot persist.
+        var hasFullLine = false
+        for (i in 0 until 8) {
+            if ((bits and Board.ROW_MASKS[i]) == Board.ROW_MASKS[i]) hasFullLine = true
+            if ((bits and Board.COL_MASKS[i]) == Board.COL_MASKS[i]) hasFullLine = true
+        }
+        if (hasFullLine) {
+            boardConf = min(boardConf, 0.3)
+            notes.add("a complete row or column cannot exist on the board: probably misread")
+        }
+        return BoardReading(bits, conf, boardConf, notes)
     }
 
     /** Learn the empty look (mean feature vector of the cells the user confirmed as empty). */

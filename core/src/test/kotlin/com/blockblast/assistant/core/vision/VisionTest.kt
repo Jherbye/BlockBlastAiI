@@ -108,6 +108,12 @@ class VisionTest {
         assertTrue(search.ranked.isNotEmpty())
     }
 
+    @Test fun pipelineAcceptsAnEmptyBoardAtGameStart() {
+        val result = RecognitionPipeline().recognize(SyntheticFrames.render(spec(0L)))
+        assertTrue("notes=${result.notes} board=${result.board?.confidence}", result.ok)
+        assertEquals(0L, result.board!!.bits)
+    }
+
     @Test fun pipelineUsesManualGeometryWhenGiven() {
         val frame = SyntheticFrames.render(spec(sampleBoard))
         val result = RecognitionPipeline().recognize(frame, BoardGeometry(60f, 480f, 120f))
@@ -146,5 +152,12 @@ class VisionTest {
         assertTrue(ChangeDetector().changedCount(changedReal, base) >= 4)
         val pieceUsed = SyntheticFrames.render(spec(sampleBoard, pieces = listOf(null, SyntheticFrames.BAR3, SyntheticFrames.SQUARE)))
         assertTrue(ChangeDetector().changedCount(pieceUsed, base) >= 4)
+    }
+
+    @Test fun resultSummaryNamesTheLimitingStage() {
+        val blank = RecognitionPipeline().recognize(PixelFrame(1080, 2340, IntArray(1080 * 2340) { Px.rgb(20, 28, 60) }))
+        assertTrue(blank.summary, blank.summary.contains("grid") || blank.summary.contains("board"))
+        val good = RecognitionPipeline().recognize(SyntheticFrames.render(spec(sampleBoard)))
+        assertEquals("good", good.summary)
     }
 }

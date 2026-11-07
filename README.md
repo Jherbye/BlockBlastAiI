@@ -8,6 +8,11 @@ floating overlay. **It never taps, drags, or automates gameplay; the user makes 
 First functional version of the Android app, **never compiled or run yet**; see `docs/DEVELOPMENT_STATUS.md` and
 `docs/RECOGNITION.md` for exactly what is and is not verified. Recognition has been exercised on synthetic frames only.
 
+## Modes
+- **Assist** (default): scans, recognises, highlights recommended placements. Never touches the game.
+- **Autoplay** (optional, opt-in): drags pieces for you via an accessibility service you enable yourself; verifies every move;
+  stops when recognition is doubtful; E-STOP ends it. See `docs/AUTOPLAY.md` (not validated on a device yet).
+
 ## Install (debug APK)
 GitHub Actions builds it: open the `build-apk` run -> **Artifacts** -> `block-blast-assistant-debug-apk` -> unzip -> install
 the `.apk` (allow installs from your file manager/browser). Then: grant overlay permission, tap Start, accept the screen

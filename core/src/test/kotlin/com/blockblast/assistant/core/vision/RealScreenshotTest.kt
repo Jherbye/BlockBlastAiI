@@ -60,4 +60,23 @@ class RealScreenshotTest {
         assertEquals(listOf(0, 1, 2), result.slots)
         assertTrue("notes=${result.notes} conf=${result.confidence}", result.ok)
     }
+
+    /**
+     * Dark board with lavender and tan beveled blocks, other apps' chat-head overlays on screen
+     * (com.block.juggle, 1080x2400). Regression for: board correct but confidence 0.49 ("needs correction").
+     */
+    @Test fun darkLavenderTanScreenshot() {
+        val frame = load("Screenshot_20261105_174843_com_block_juggle.jpg")
+        assumeTrue("real screenshot not available; skipping", frame != null)
+        val result = RecognitionPipeline().recognize(frame!!)
+        val g = result.geometry!!
+        assertTrue("left ${g.left}", abs(g.left - 61f) <= 10f)
+        assertTrue("top ${g.top}", abs(g.top - 580f) <= 10f)
+        assertTrue("cell ${g.cellSize}", abs(g.cellSize - 119.3f) <= 2.5f)
+        val rows = listOf(".##..##.", ".....##.", "..#..##.", "...##.#.", "....##..", "..#.###.", "..#.###.", ".##.###.")
+        assertEquals(rows, com.blockblast.assistant.core.model.Board.ofBits(result.board!!.bits).toRows())
+        assertEquals(listOf(Piece.parse("#", "#", "#", "#"), Piece.parse("#", "#", "#", "#"), Piece.parse("##", "##", "##")), result.pieceList)
+        assertTrue("board confidence ${result.board!!.confidence}", result.board!!.confidence >= 0.9)
+        assertTrue("notes=${result.notes} conf=${result.confidence}", result.ok)
+    }
 }

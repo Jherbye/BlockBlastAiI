@@ -13,10 +13,26 @@ data class RecognitionResult(
     val confidence: Double,
     /** True only when geometry, every cell and every piece were read with enough confidence to show moves. */
     val ok: Boolean,
+    /** Geometry and every board cell were read with enough confidence. */
+    val boardOk: Boolean,
+    /** At least one piece was read and none is doubtful. */
+    val piecesOk: Boolean,
+    /** Slots (0..2) whose piece is doubtful or may have been missed; empty when the pieces are fine. */
+    val uncertainSlots: List<Int>,
     /** A reading exists but is not trustworthy: the UI should offer manual correction instead of showing moves. */
     val needsCorrection: Boolean,
     val notes: List<String>,
 ) {
+    /** One line naming WHICH stage limits confidence, for the status area. */
+    val summary: String
+        get() = when {
+            geometry == null -> "board grid not found"
+            board == null -> "grid weak (${"%.2f".format(locateConfidence)})"
+            !boardOk -> "board ${"%.2f".format(board.confidence)}: ${board.weakCells.size} doubtful cell(s)"
+            uncertainSlots.isNotEmpty() -> "board good; piece ${uncertainSlots.joinToString { (it + 1).toString() }} uncertain"
+            !piecesOk -> "board good; no pieces visible"
+            else -> "good"
+        }
     val pieceList: List<Piece> get() = pieces?.pieces?.map { it.piece } ?: emptyList()
     val slots: List<Int> get() = pieces?.pieces?.map { it.slot } ?: emptyList()
 }
@@ -70,11 +86,11 @@ class RecognitionPipeline(
                     loc = locator.locate(frame)
                     if (loc == null) {
                         notes.add("board grid not found")
-                        return RecognitionResult(null, GeometrySource.NONE, 0.0, null, null, 0.0, false, false, notes)
+                        return RecognitionResult(null, GeometrySource.NONE, 0.0, null, null, 0.0, false, false, false, emptyList(), false, notes)
                     }
                     if (loc.confidence < MIN_LOCATE) {
                         notes.add("grid found but weak (confidence ${"%.2f".format(loc.confidence)}): calibrate the board")
-                        return RecognitionResult(loc.geometry, GeometrySource.AUTO, loc.confidence, null, null, 0.0, false, false, notes)
+                        return RecognitionResult(loc.geometry, GeometrySource.AUTO, loc.confidence, null, null, 0.0, false, false, false, emptyList(), false, notes)
                     }
                     cached = loc
                 }
@@ -87,7 +103,7 @@ class RecognitionPipeline(
             ) {
                 notes.add("board geometry lies outside the frame")
                 cached = null
-                return RecognitionResult(geometry, source, locConf, null, null, 0.0, false, false, notes)
+                return RecognitionResult(geometry, source, locConf, null, null, 0.0, false, false, false, emptyList(), false, notes)
             }
             val pieces = extractor.extract(frame, geometry)
             val palette = pieces?.pieces?.map { it.rgb } ?: emptyList()
@@ -103,17 +119,19 @@ class RecognitionPipeline(
             val pieceConf = pieces?.confidence ?: 0.0
             val conf = minOf(board.confidence, pieceConf, locConf)
             val hasPieces = pieces != null && pieces.pieces.isNotEmpty()
-            val ok = hasPieces && locConf >= MIN_LOCATE && board.confidence >= MIN_BOARD && pieceConf >= MIN_PIECES
+            val boardOk = locConf >= MIN_LOCATE && board.confidence >= MIN_BOARD
+            val piecesOk = hasPieces && pieceConf >= MIN_PIECES
+            val ok = boardOk && piecesOk
             if (hasPieces && board.confidence < MIN_BOARD) notes.add("board reading confidence ${"%.2f".format(board.confidence)} is too low")
             if (pieces != null && pieces.pieces.isEmpty()) notes.add("no pieces visible (waiting for a new set?)")
             val needsCorrection = !ok && (hasPieces || board.confidence < MIN_BOARD)
-            return RecognitionResult(geometry, source, locConf, board, pieces, conf, ok, needsCorrection, notes)
+            return RecognitionResult(geometry, source, locConf, board, pieces, conf, ok, boardOk, piecesOk, pieces?.uncertainSlots ?: emptyList(), needsCorrection, notes)
         }
     }
 
     companion object {
         const val MIN_LOCATE = 0.5
-        const val MIN_BOARD = 0.75
+        const val MIN_BOARD = 0.9
         const val MIN_PIECES = 0.5
     }
 }

@@ -7,11 +7,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Deliberately NOT declared: any Accessibility Service. This app never performs gestures or input. -->
+    <!-- Gestures are only possible through the OPTIONAL accessibility service below, which the user must enable in
+         Android Settings, and which is used only while Autoplay mode is running. Assist mode never uses it. -->
 
     <application
         android:allowBackup="false"
-        android:label="Block Blast Assistant"
+        android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
         <activity
@@ -27,5 +28,18 @@
             android:name=".app.AssistantService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name=".app.AutoplayAccessibilityService"
+            android:exported="false"
+            android:label="@string/autoplay_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/autoplay_accessibility_config" />
+        </service>
     </application>
 </manifest>

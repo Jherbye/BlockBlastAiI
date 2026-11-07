@@ -2,11 +2,19 @@ package com.blockblast.assistant.core.vision
 
 import com.blockblast.assistant.core.model.Piece
 
+/**
+ * Where to put a finger to pick a tray piece up: the centre of one of its filled cells (never an empty corner of its
+ * bounding box), the index of that cell inside the normalized piece, and its screen position.
+ */
+data class PieceGrab(val cellX: Int, val cellY: Int, val x: Float, val y: Float)
+
 data class VerifiedState(
     val boardBits: Long,
     val geometry: BoardGeometry,
     val pieces: List<Piece>,
     val slots: List<Int>,
+    /** Parallel to [pieces]; null entries (e.g. after a manual correction) mean the position is unknown. */
+    val grabs: List<PieceGrab?> = emptyList(),
 )
 
 sealed class Stability {
@@ -32,7 +40,7 @@ class StableStateTracker(private val needed: Int = 2) {
             reset()
             return Stability.Rejected(r.notes.joinToString("; ").ifEmpty { "recognition not confident" })
         }
-        val state = VerifiedState(board.bits, g, r.pieceList, r.slots)
+        val state = VerifiedState(board.bits, g, r.pieceList, r.slots, r.pieces?.pieces?.map { it.grab } ?: emptyList())
         val prev = candidate
         if (prev != null && same(prev, state)) count++ else {
             candidate = state

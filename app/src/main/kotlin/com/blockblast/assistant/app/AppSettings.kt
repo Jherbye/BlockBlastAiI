@@ -26,6 +26,14 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("diagnostics", false)
         set(v) = p.edit().putBoolean("diagnostics", v).apply()
 
+    /** Learned finger-to-drop offset in pixels for Autoplay (how far the dropped piece lands from the finger). */
+    var dropOffsetX: Float
+        get() = p.getFloat("drop_dx", 0f)
+        set(v) = p.edit().putFloat("drop_dx", v).apply()
+    var dropOffsetY: Float
+        get() = p.getFloat("drop_dy", 0f)
+        set(v) = p.edit().putFloat("drop_dy", v).apply()
+
     /** Empty-cell look learned from boards the user confirmed (6 numbers), or null. Cleared by "Forget learned theme". */
     var emptyLook: DoubleArray?
         get() = p.getString("empty_look", null)?.split(",")?.mapNotNull { it.toDoubleOrNull() }?.takeIf { it.size == 6 }?.toDoubleArray()

@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Recognition: first-significant-gap decision line, structural checks, per-stage and per-piece confidence, board acceptance 0.9.
+- Persistent compact control panel with debounced status; Assist/Autoplay modes; AutoplayAccessibilityService; AutoplayPlanner; E-STOP.
 - Piece reader tries three background models (fixes tray lost when pieces cover most of a row, found on a real screenshot); second real screenshot added to the local real-screenshot test.
 - Theme-independent recognition (gap-geometry locator, empty-look cell reader, background-relative tray reader), per-cell confidence, Fix (manual correction + theme learning), synthetic theme generator and robustness test. Uncompiled.
 - Locator rewritten to detect cell-gap valleys (fixes "lattice confidence too low" on a real screenshot); tray scale prior 0.5; local-only real-screenshot test.

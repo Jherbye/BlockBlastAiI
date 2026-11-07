@@ -22,6 +22,18 @@ Stages D-F implemented as a first functional version (app module, capture, recog
   compiled yet; APK status unknown.**
 - Test logging now prints failure messages in the CI console.
 
+## Latest round: confidence, persistent panel, Autoplay
+IMPLEMENTED (code written; none of it compiled or run by the author):
+- Recognition: first-significant-gap decision line, structural check (complete line impossible), per-stage confidence
+  (grid / board / each piece), `weakCells`, `uncertainSlots`, `summary`; board acceptance 0.9; empty-board-at-start rule.
+- Panel: one persistent compact panel (never recreated, only re-rendered when `PanelState` changes, sticky message with a
+  1.5 s cooldown, 44 dp buttons, draggable, position remembered per session, collapse button, hidden during a scan only if it
+  covers the board/tray); Recognition Good/Uncertain/Needs correction; Mode chip; Start/Pause/Resume; Prev/Next; Undo;
+  Hide; Cal; Auto; Fix (highlights the uncertain piece); Scan; E-STOP; Quit.
+- Autoplay: see docs/AUTOPLAY.md. `AutoplayPlanner` (+ unit tests) is pure Kotlin.
+VALIDATED: board/pieces/confidence on three real screenshots in the Python mirror only; calibration on synthetic themes
+(Python mirror). NOT validated: any of the Kotlin or Android code, the panel on a phone, any Autoplay gesture.
+
 ## Real-device feedback log
 - Build 1: "lattice confidence 0.17 too low" on the chocolate theme -> gap-based locator.
 - CI compile failure: stale `CellClassifier.kt` left in the repo (copying a zip over a clone never deletes files; use
@@ -66,6 +78,7 @@ for its own buttons. Verified by inspection only: the manifest declares no acces
 - Notification/FGS-type permission flows on Android 14+/15 untested.
 
 ## Next steps
+00. Push; read `build-apk` (compile, :core:test incl. ThemeRobustnessTest report, APK). Then test Assist on the phone, then Autoplay cautiously.
 0. Push, read the CI run (core tests incl. `ThemeRobustnessTest`, then `:app:assembleDebug`); fix real compile/test failures.
 1. Push this revision; read the `core-validation` and `build-apk` runs; record every compile error/test failure here; fix without weakening tests.
 2. Install the debug APK; report what the diagnostics show on a real Block Blast screen (and screenshots you are happy to share).
