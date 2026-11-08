@@ -22,7 +22,14 @@ Stages D-F implemented as a first functional version (app module, capture, recog
   compiled yet; APK status unknown.**
 - Test logging now prints failure messages in the CI console.
 
-## Latest round: confidence, persistent panel, Autoplay
+## Autoplay field report and fix (latest)
+Phone test: panel showed "Autoplay running on com.vivo.systemuiplugin"; Autoplay stopped by itself and pieces were dragged
+but nothing was placed. Causes: (1) foreground-package tracking latched onto a system overlay, then paused when it changed;
+(2) open-loop drop ignored the game's finger-to-piece offset. Fixes: package check removed; closed-loop drop with a
+dragged-piece finder (`DraggedPieceLocator`, unit-tested), safe cancel, learned offset; one re-check before judging a
+mismatch; Events log in Diagnostics. NOT yet re-tested on the phone, Kotlin NOT yet compiled.
+
+## Earlier round: confidence, persistent panel, Autoplay
 IMPLEMENTED (code written; none of it compiled or run by the author):
 - Recognition: first-significant-gap decision line, structural check (complete line impossible), per-stage confidence
   (grid / board / each piece), `weakCells`, `uncertainSlots`, `summary`; board acceptance 0.9; empty-board-at-start rule.

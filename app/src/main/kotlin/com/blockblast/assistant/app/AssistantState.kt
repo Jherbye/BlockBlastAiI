@@ -21,6 +21,7 @@ data class Snapshot(
     val needsCorrection: Boolean = false,
     val lowConfidenceCells: Int = 0,
     val learnedTheme: Boolean = false,
+    val events: List<String> = emptyList(),
 )
 
 object AssistantState {
@@ -35,6 +36,12 @@ object AssistantState {
             snapshot
         }
         listeners.forEach { it(s) }
+    }
+
+    /** Appends a timestamped line to the diagnostics event log (last 14 kept) so every stop has a visible reason. */
+    fun log(message: String) {
+        val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        update { it.copy(events = (it.events + "$stamp $message").takeLast(14)) }
     }
 
     fun addListener(l: (Snapshot) -> Unit) {

@@ -162,6 +162,8 @@ class MainActivity : Activity() {
             appendLine("Last transition: ${s.lastTransition}")
             appendLine("Notes: ${s.notes}")
             appendLine("Last error: ${s.lastError}")
+            appendLine("Events (newest last):")
+            if (s.events.isEmpty()) appendLine("  -") else s.events.forEach { appendLine("  $it") }
         }
     }
 

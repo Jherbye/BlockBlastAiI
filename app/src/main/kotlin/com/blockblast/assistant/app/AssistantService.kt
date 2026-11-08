@@ -21,6 +21,7 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.widget.Toast
 import com.blockblast.assistant.core.autoplay.AutoplayPlanner
+import com.blockblast.assistant.core.autoplay.DraggedPieceLocator
 import com.blockblast.assistant.core.autoplay.DragPlan
 import com.blockblast.assistant.core.model.Board
 import com.blockblast.assistant.core.model.Piece
@@ -35,6 +36,7 @@ import com.blockblast.assistant.core.vision.BoardGeometry
 import com.blockblast.assistant.core.vision.ChangeDetector
 import com.blockblast.assistant.core.vision.FloatRect
 import com.blockblast.assistant.core.vision.FrameBaseline
+import com.blockblast.assistant.core.vision.PieceGrab
 import com.blockblast.assistant.core.vision.PixelFrame
 import com.blockblast.assistant.core.vision.RecognitionPipeline
 import com.blockblast.assistant.core.vision.RecognitionResult
@@ -69,7 +71,8 @@ import kotlin.coroutines.resume
 class AssistantService : Service(), OverlayController.Callbacks {
 
     private enum class ScanMode { SCANNING, WATCHING }
-    private class PendingMove(val move: com.blockblast.assistant.core.solver.Move, val piece: Piece, val before: Board, val expected: Board, val cell: Float)
+    private class PendingMove(val move: com.blockblast.assistant.core.solver.Move, val piece: Piece, val before: Board, val expected: Board, val cell: Float) { var rechecks = 0 }
+    private enum class DragOutcome { RELEASED, CANCELLED, FAILED }
 
     private val executor = Executors.newSingleThreadExecutor()
     private val logic = executor.asCoroutineDispatcher()
@@ -119,7 +122,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private var notAccepted = 0
     private var lostSince = 0L
     private var lastMoveAt = 0L
-    private var targetPackage: String? = null
+    private var dragFailures = 0
     @Volatile private var emergency = false
 
     // ---- written from the main thread ----
@@ -219,6 +222,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
         }
         pendingMessage = null
         lastMessageAt = now
+        if (sev != Severity.INFO) AssistantState.log(text)
         setPanel { it.copy(message = text, severity = sev) }
     }
 
@@ -372,14 +376,16 @@ class AssistantService : Service(), OverlayController.Callbacks {
     }
 
     private suspend fun onVerified(state: VerifiedState) {
+        val pm = pending
+        if (pm != null) {
+            val recheck = verifyMove(pm, state)
+            if (recheck) { tracker.reset(); scanMode = ScanMode.SCANNING; scanDelayMs = 1200L; verified = state; return }
+            pending = null
+        }
         scanMode = ScanMode.WATCHING
-        val previous = verified
         verified = state
         changeStart = 0L; stableTicks = 0
         baseline = null
-        pending?.let { verifyMove(it, state) }
-        pending = null
-        if (run == RunState.NEEDS_ATTENTION || previous == null) { /* keep status as set */ }
         AssistantState.update { it.copy(lastTransition = "state verified; searching") }
         say("Board verified. Searching moves...")
         startSolve(state)
@@ -433,6 +439,7 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private suspend fun attention(reason: String) {
         run = RunState.NEEDS_ATTENTION
         pending = null
+        AssistantState.update { it.copy(lastError = reason) }
         setPanel { it.copy(run = RunState.NEEDS_ATTENTION) }
         say(reason, Severity.ERROR)
     }
@@ -447,8 +454,6 @@ class AssistantService : Service(), OverlayController.Callbacks {
         if (res != null && !res.ok && !userConfirmed) { attention("Autoplay stopped: recognition is not confident. Tap Fix, then Resume."); return }
         val svc = AutoplayAccessibilityService.instance
         if (svc == null) { attention("Autoplay stopped: the accessibility input service is off. Enable it in Android Settings > Accessibility."); return }
-        val front = AutoplayAccessibilityService.foregroundPackage
-        if (targetPackage != null && front != null && front != targetPackage) { attention("Autoplay paused: the game is no longer in front ($front)."); return }
         val rec = recs.first()
         val grab = state.grabs.getOrNull(rec.move.pieceIndex)
         if (grab == null) { say("Autoplay needs the piece positions: tap Scan once.", Severity.WARNING); scanMode = ScanMode.SCANNING; tracker.reset(); scanDelayMs = 200L; userConfirmed = false; return }
@@ -465,13 +470,22 @@ class AssistantService : Service(), OverlayController.Callbacks {
         say("Autoplay: moving piece ${rec.move.pieceIndex + 1} to column ${rec.move.x + 1}, row ${rec.move.y + 1}...")
         withContext(Dispatchers.Main) { overlay?.clearHighlights() }
         if (emergency) { pending = null; return }
-        val ok = dragAndAwait(plan)
-        if (!ok) {
-            pending = null
-            notAccepted++
-            if (notAccepted >= 3) attention("Autoplay stopped: the gesture was rejected 3 times. Check that the accessibility service is enabled.")
-            else say("The drag was not performed; retrying.", Severity.WARNING)
-            return
+        when (closedLoopDrag(state, rec, grab, plan)) {
+            DragOutcome.RELEASED -> dragFailures = 0
+            DragOutcome.CANCELLED -> {
+                pending = null
+                dragFailures++
+                if (dragFailures >= 3) attention("Autoplay stopped: the dragged piece could not be found or lined up with its target 3 times (cancelled safely each time).")
+                else say("Could not line the piece up with its target; the drag was cancelled safely. Retrying.", Severity.WARNING)
+                return
+            }
+            DragOutcome.FAILED -> {
+                pending = null
+                notAccepted++
+                if (notAccepted >= 3) attention("Autoplay stopped: the gesture was rejected 3 times. Check that the accessibility service is enabled.")
+                else say("The drag could not be performed; retrying.", Severity.WARNING)
+                return
+            }
         }
         delay(SETTLE_AFTER_MOVE_MS) // let the game finish its animation before reading it again
         tracker.reset()
@@ -489,26 +503,85 @@ class AssistantService : Service(), OverlayController.Callbacks {
     private fun pathBounds(p: DragPlan): FloatRect =
         FloatRect(minOf(p.fromX, p.toX) - 20f, minOf(p.fromY, p.toY) - 20f, maxOf(p.fromX, p.toX) + 20f, maxOf(p.fromY, p.toY) + 20f)
 
-    private suspend fun dragAndAwait(p: DragPlan): Boolean {
-        val svc = AutoplayAccessibilityService.instance ?: return false
-        return withTimeoutOrNull(5000L) {
+    private suspend fun awaitStroke(block: ((Boolean) -> Unit) -> Unit): Boolean =
+        withTimeoutOrNull(4000L) {
             suspendCancellableCoroutine<Boolean> { cont ->
-                mainHandler.post {
-                    svc.drag(p.fromX, p.fromY, p.toX, p.toY, DRAG_MS) { ok -> if (cont.isActive) cont.resume(ok) }
-                }
+                mainHandler.post { block { ok -> if (cont.isActive) cont.resume(ok) } }
             }
         } ?: false
+
+    private suspend fun freshFrame(): PixelFrame? {
+        val cap = capturer ?: return null
+        cap.invalidate()
+        for (i in 0 until 8) {
+            delay(100)
+            cap.latestFrame()?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * Closed-loop drop. Press the piece, move near the target, HOLD (finger still down), capture the screen, measure
+     * where the dragged piece really is (games often draw it well above the finger), nudge the finger until the piece
+     * sits on the target, and only then release. If the piece cannot be found or aligned, the drag is cancelled by
+     * returning to the tray, so nothing is placed by guesswork. The measured correction is remembered as the drop offset.
+     */
+    private suspend fun closedLoopDrag(state: VerifiedState, rec: Recommendation, grab: PieceGrab, plan: DragPlan): DragOutcome {
+        val svc = AutoplayAccessibilityService.instance ?: return DragOutcome.FAILED
+        val before = lastFrame ?: return DragOutcome.FAILED
+        val g = state.geometry
+        val s = g.cellSize.toDouble()
+        val trayCell = lastResult?.pieces?.cellPx?.takeIf { it > 0.0 } ?: (0.5 * s)
+        suspend fun cancel(): DragOutcome {
+            awaitStroke { cb -> svc.moveTo(grab.x, grab.y, 300L, false, cb) }
+            return DragOutcome.CANCELLED
+        }
+        if (!awaitStroke { cb -> svc.begin(grab.x, grab.y, PRESS_MS, cb) }) return DragOutcome.FAILED
+        var fx = plan.toX
+        var fy = plan.toY
+        if (!awaitStroke { cb -> svc.moveTo(fx, fy, APPROACH_MS, true, cb) }) return DragOutcome.FAILED
+        val piece = rec.move.piece
+        val wantX = g.left + (rec.move.x + piece.width / 2.0) * s
+        val wantY = g.top + (rec.move.y + piece.height / 2.0) * s
+        var aligned = false
+        var measured = false
+        for (iteration in 0 until 4) {
+            if (emergency || run != RunState.RUNNING) return cancel()
+            delay(HOVER_SETTLE_MS)
+            val now = freshFrame() ?: break
+            val found = DraggedPieceLocator.locate(
+                before, now, piece, listOf(s, trayCell), fx, fy,
+                grab.x, grab.y, (0.8 * maxOf(piece.width, piece.height) * trayCell + trayCell).toFloat(), (6.0 * s).toFloat(),
+            ) ?: break
+            measured = true
+            val errX = (wantX - found.centerX).toFloat()
+            val errY = (wantY - found.centerY).toFloat()
+            AssistantState.log("hover ${iteration + 1}: piece is (${errX.toInt()}, ${errY.toInt()}) px from its target")
+            if (kotlin.math.abs(errX) < 0.2 * s && kotlin.math.abs(errY) < 0.2 * s) { aligned = true; break }
+            fx += errX
+            fy += errY
+            if (!awaitStroke { cb -> svc.moveTo(fx, fy, NUDGE_MS, true, cb) }) return DragOutcome.FAILED
+        }
+        if (!aligned) {
+            AssistantState.log(if (measured) "could not line the piece up with the target" else "dragged piece not found on screen")
+            return cancel()
+        }
+        settings.dropOffsetX += fx - plan.toX
+        settings.dropOffsetY += fy - plan.toY
+        AssistantState.log("aligned; drop offset now (${settings.dropOffsetX.toInt()}, ${settings.dropOffsetY.toInt()}) px; releasing")
+        return if (awaitStroke { cb -> svc.moveTo(fx, fy, RELEASE_MS, false, cb) }) DragOutcome.RELEASED else DragOutcome.FAILED
     }
 
     /** Compare the freshly verified board with the rules engine's prediction for the move just made. */
-    private suspend fun verifyMove(pm: PendingMove, now: VerifiedState) {
+    private suspend fun verifyMove(pm: PendingMove, now: VerifiedState): Boolean {
         val observed = Board.ofBits(now.boardBits)
         if (observed == pm.expected) {
             moveCount++; mismatches = 0; notAccepted = 0
+            AssistantState.log("move $moveCount verified")
             setPanel { it.copy(progress = "Moves verified: $moveCount") }
-            return
+            return false
         }
-        if (run != RunState.RUNNING) return
+        if (run != RunState.RUNNING) return false
         val landed = AutoplayPlanner.explainPlacement(rules, pm.before, pm.piece, observed)
         when {
             landed != null -> {
@@ -525,8 +598,18 @@ class AssistantService : Service(), OverlayController.Callbacks {
                 if (notAccepted >= 3) attention("Autoplay stopped: the game did not accept the drag 3 times. Check the accessibility service and the piece positions.")
                 else say("The game did not accept that drag (board unchanged). Retrying.", Severity.WARNING)
             }
-            else -> attention("Autoplay stopped: the board changed in a way the move does not explain. Tap Fix to check it, then Resume.")
+            pm.rechecks == 0 -> {
+                // animations or special tiles may still be settling: look once more before judging
+                pm.rechecks++
+                say("The board differs from the prediction; re-checking once...", Severity.WARNING)
+                return true
+            }
+            else -> {
+                val diff = java.lang.Long.bitCount(now.boardBits xor pm.expected.bits)
+                attention("Autoplay stopped: $diff cell(s) differ from what the move should produce. Tap Fix to check the board, then Resume.")
+            }
         }
+        return false
     }
 
     // ---- overlay callbacks (main thread) ---------------------------------------------------------------------------
@@ -573,14 +656,12 @@ class AssistantService : Service(), OverlayController.Callbacks {
                 RunState.RUNNING -> { run = RunState.PAUSED; pending = null; say("Autoplay paused.") }
                 else -> {
                     if (!AutoplayAccessibilityService.isEnabled) { say("Enable the accessibility input service first (Android Settings > Accessibility).", Severity.ERROR); return@launch }
-                    val front = AutoplayAccessibilityService.foregroundPackage
-                    if (front == null) { say("Open the game once so its app can be identified, then press Start.", Severity.WARNING); return@launch }
                     emergency = false
-                    targetPackage = front
-                    moveCount = 0; mismatches = 0; notAccepted = 0; lostSince = 0L
+                    moveCount = 0; mismatches = 0; notAccepted = 0; dragFailures = 0; lostSince = 0L
                     run = RunState.RUNNING
                     scanMode = ScanMode.SCANNING; tracker.reset(); scanDelayMs = 100L
-                    say("Autoplay running on $front. It stops by itself if recognition is doubtful.", Severity.WARNING)
+                    say("Autoplay running. It only moves on a verified Good reading and stops by itself if recognition is doubtful.", Severity.WARNING)
+                    AssistantState.log("autoplay started")
                 }
             }
             setPanel { it.copy(run = run) }
@@ -727,6 +808,10 @@ class AssistantService : Service(), OverlayController.Callbacks {
         private const val RECOVERY_WINDOW_MS = 12_000L
         private const val MIN_MOVE_GAP_MS = 700L
         private const val SETTLE_AFTER_MOVE_MS = 1300L
-        private const val DRAG_MS = 550L
+        private const val PRESS_MS = 160L
+        private const val APPROACH_MS = 450L
+        private const val HOVER_SETTLE_MS = 250L
+        private const val NUDGE_MS = 250L
+        private const val RELEASE_MS = 120L
     }
 }

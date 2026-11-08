@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Autoplay: closed-loop drop (hold, measure the dragged piece, nudge, release or cancel), DraggedPieceLocator, no foreground-package check, one re-check before declaring a mismatch, Events log.
 - Recognition: first-significant-gap decision line, structural checks, per-stage and per-piece confidence, board acceptance 0.9.
 - Persistent compact control panel with debounced status; Assist/Autoplay modes; AutoplayAccessibilityService; AutoplayPlanner; E-STOP.
 - Piece reader tries three background models (fixes tray lost when pieces cover most of a row, found on a real screenshot); second real screenshot added to the local real-screenshot test.
