@@ -36,10 +36,15 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Generate Gradle wrapper 8.10.2 (only if not committed)
+      - name: Generate Gradle wrapper 8.10.2 (only if not committed; best effort)
+        continue-on-error: true
         run: |
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            gradle wrapper --gradle-version 8.10.2
+            for i in 1 2 3; do
+              gradle wrapper --gradle-version 8.10.2 --no-validate-url && break
+              echo "wrapper attempt $i failed; retrying in 5 s"
+              sleep 5
+            done
           fi
 
       - name: Core unit tests (rules, solver, vision)
